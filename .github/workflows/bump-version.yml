@@ -8,6 +8,15 @@ on:
         required: true
         type: choice
         options: [patch, minor, major]
+      match_readonly:
+        # Escape hatch for "App-ID capabilities changed, profiles need
+        # regenerating". Needs a *write* deploy key in MATCH_REPO_KEY and an API
+        # key allowed to manage profiles. Leave as 'true' for normal releases.
+        description: "Set to 'false' to let match regenerate provisioning profiles"
+        required: false
+        type: choice
+        default: 'true'
+        options: ['true', 'false']
 
 permissions:
   contents: write
@@ -20,7 +29,7 @@ jobs:
       new_tag: ${{ steps.version.outputs.new_tag }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -56,5 +65,9 @@ jobs:
     uses: ./.github/workflows/release.yml
     with:
       tag: ${{ needs.tag.outputs.new_tag }}
+      match_readonly: ${{ inputs.match_readonly }}
     permissions:
       contents: write
+    # Required: signing secrets do NOT cross workflow_call automatically. Without
+    # this they all expand to "" and the release fails in fastlane.
+    secrets: inherit

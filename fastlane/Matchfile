@@ -1,0 +1,20 @@
+# match stores the distribution cert + App Store profiles, encrypted, in a
+# separate private git repo (MATCH_GIT_URL, an SSH URL). CI reads it via a
+# read-only deploy key loaded into the ssh-agent.
+#
+# The signing repo is per Apple *team*, not per app — the distribution cert is
+# team-wide (and capped by Apple), so one repo serves every app under the team
+# and profiles are namespaced by bundle ID. If ssalonen/ios-signing is already
+# seeded for another app, add these two identifiers to it rather than creating a
+# second repo.
+#
+# BOTH bundle IDs must be listed. If the Safari extension's id is omitted, match
+# silently skips its profile and the build later fails with a *misleading* error
+# pointing at the container app, not the missing extension profile.
+git_url(ENV["MATCH_GIT_URL"])
+storage_mode("git")
+type("appstore")
+app_identifier([
+  "fi.mailhub.keepscrolling",
+  "fi.mailhub.keepscrolling.Extension",
+])

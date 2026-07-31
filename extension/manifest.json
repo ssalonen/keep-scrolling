@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Shreddit — Reddit Nag Remover",
+  "name": "Keep Scrolling",
   "version": "1.0",
   "description": "Removes Reddit's app-install blocking sheet and restores scrolling.",
   "icons": {

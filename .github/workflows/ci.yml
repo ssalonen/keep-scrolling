@@ -20,10 +20,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
 
@@ -32,9 +32,6 @@ jobs:
 
       - name: Validate manifest.json parses
         run: node -e "JSON.parse(require('fs').readFileSync('extension/manifest.json','utf8'))"
-
-      - name: Validate altstore-source.json parses
-        run: node -e "JSON.parse(require('fs').readFileSync('altstore-source.json','utf8'))"
 
       - name: Run invariant tests
         run: node --test
@@ -49,9 +46,9 @@ jobs:
   #   chore/docs/test/ci/etc only → NO release
   #
   # Skipping releases for non-functional commits keeps version numbers
-  # meaningful and self-defuses the loop: the release workflow's own
-  # "chore: update AltStore source" commit is non-releasable, so it can never
-  # trigger another release.
+  # meaningful. The release workflow no longer commits anything back to main
+  # (the version lives only in the tag), so there is no bot commit that could
+  # feed back into this job.
   compute-version:
     name: Compute release version
     needs: [test]
@@ -64,7 +61,7 @@ jobs:
       new_tag: ${{ steps.semver.outputs.new_tag }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0  # full history + tags needed to find the last release
 
@@ -72,7 +69,7 @@ jobs:
         id: semver
         run: |
           python3 - <<'PYEOF'
-          import json, os, re, subprocess
+          import os, re, subprocess
 
           def sh(*args):
               return subprocess.run(args, capture_output=True, text=True).stdout.strip()
@@ -88,16 +85,11 @@ jobs:
           semver_tags = [t for t in tags if re.match(r'^v\d+\.\d+\.\d+$', t)]
           latest_tag = semver_tags[0] if semver_tags else None
 
-          # Base version = max(latest tag, version already published in the
-          # AltStore source). The source floor defends against tags missing
-          # from the clone so the version can only ever move forward.
+          # Base version = the latest tag. Tags are the only version store now
+          # (fastlane stamps the tag into the build), so the checkout above uses
+          # fetch-depth: 0 to guarantee they are all present — without the full
+          # history this would silently restart numbering from v0.0.0.
           base = parse(latest_tag)
-          try:
-              with open("altstore-source.json") as f:
-                  src_ver = json.load(f)["apps"][0].get("version", "0.0.0")
-              base = max(base, parse(src_ver))
-          except Exception as e:
-              print("Could not read source version:", e)
 
           # Commits to classify: since the last tag (whole history if none).
           rng = f"{latest_tag}..HEAD" if latest_tag else "HEAD"
@@ -162,3 +154,6 @@ jobs:
       tag: ${{ needs.compute-version.outputs.new_tag }}
     permissions:
       contents: write
+    # Required: signing secrets do NOT cross workflow_call automatically. Without
+    # this they all expand to "" and the release fails in fastlane.
+    secrets: inherit

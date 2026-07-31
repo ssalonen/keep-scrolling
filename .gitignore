@@ -5,3 +5,16 @@ DerivedData/
 *.xcarchive
 *.ipa
 Payload/
+
+# fastlane. Gemfile.lock is NOT ignored — commit it so CI and local resolve the
+# same gem versions.
+vendor/
+.bundle/
+fastlane/report.xml
+fastlane/README.md
+fastlane/test_output/
+# Local secrets for fastlane (ASC private key, match passphrase). The committed
+# .env.example is the template; the real .env must never be committed.
+fastlane/.env
+fastlane/.env.*
+!fastlane/.env.example

@@ -1,7 +1,9 @@
 name: Build & Release
 
 # Trigger by pushing a version tag: git tag v1.0.0 && git push origin v1.0.0
-# Also callable from ci.yml / bump-version.yml via workflow_call.
+# Also callable from ci.yml / bump-version.yml via workflow_call — those callers
+# MUST pass `secrets: inherit`, or every signing secret silently expands to ""
+# and fastlane dies with a cryptic error (see the gate below).
 on:
   push:
     tags:
@@ -12,29 +14,52 @@ on:
         description: 'Tag to release (e.g. v1.0.0)'
         required: true
         type: string
+      match_readonly:
+        # The escape hatch for "App-ID capabilities changed, profiles need
+        # regenerating" — without it the only route is re-seeding from a Mac.
+        # Needs a *write* deploy key in MATCH_REPO_KEY and an API key allowed to
+        # manage profiles; leave it alone for normal releases.
+        description: "Set to 'false' to let match regenerate provisioning profiles"
+        required: false
+        type: string
+        default: 'true'
+
+# Serialize releases: never run two at once (racing TestFlight build numbers, or
+# racing GitHub Release creation). cancel-in-progress: false so an in-flight
+# upload is queued behind, never killed mid-way.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
-  contents: write  # needed to push altstore-source.json and create the release
-
-env:
-  APP_NAME: Shreddit
-  BUNDLE_ID: com.ssalonen.shreddit
+  contents: read
 
 jobs:
-  release:
-    name: Build & Release IPA
+  # ── Generate, sign, build, upload (needs macOS) ─────────────────────────────
+  build:
+    name: Sign & upload to TestFlight
     runs-on: macos-latest
-
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version_num: ${{ steps.version.outputs.version_num }}
+    env:
+      # fastlane (match, gym, pilot) reads all of these. Signing is fully
+      # managed by match — no keychains, .p12s, or hand-minted profiles here.
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      APP_STORE_CONNECT_API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+      MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+      MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+      # Fail safe: anything other than an explicit 'false' means readonly. A
+      # tag-push run has no inputs at all, so it lands on 'true'.
+      MATCH_READONLY: ${{ inputs.match_readonly == 'false' && 'false' || 'true' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          # Check out the tag so the IPA is built with the correct version number.
-          # The commit step will switch to main before pushing altstore-source.json.
-          token: ${{ secrets.GITHUB_TOKEN }}
+        uses: actions/checkout@v7
 
       - name: Get version from tag
+        id: version
         run: |
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
@@ -42,26 +67,100 @@ jobs:
             TAG="${{ inputs.tag }}"
           fi
           VERSION_NUM="${TAG#v}"
-          echo "TAG=$TAG"                   >> "$GITHUB_ENV"
-          echo "VERSION_NUM=$VERSION_NUM"   >> "$GITHUB_ENV"
+          echo "tag=$TAG"                 >> "$GITHUB_OUTPUT"
+          echo "version_num=$VERSION_NUM" >> "$GITHUB_OUTPUT"
+          # fastlane stamps this into the generated project (see build_signed_ipa).
+          echo "MARKETING_VERSION=$VERSION_NUM" >> "$GITHUB_ENV"
+
+      # Fail fast with a clear message if the signing secrets aren't visible.
+      # The classic trap: when this workflow runs via workflow_call, the caller
+      # must forward secrets with `secrets: inherit` — otherwise every secret
+      # silently expands to "" and fastlane dies with a cryptic error.
+      - name: Verify signing secrets are present
+        run: |
+          missing=()
+          [ -n "$APPLE_TEAM_ID" ]                || missing+=(APPLE_TEAM_ID)
+          [ -n "$APP_STORE_CONNECT_KEY_ID" ]     || missing+=(APP_STORE_CONNECT_KEY_ID)
+          [ -n "$APP_STORE_CONNECT_ISSUER_ID" ]  || missing+=(APP_STORE_CONNECT_ISSUER_ID)
+          [ -n "$APP_STORE_CONNECT_API_KEY_P8" ] || missing+=(APP_STORE_CONNECT_API_KEY_P8)
+          [ -n "$MATCH_PASSWORD" ]               || missing+=(MATCH_PASSWORD)
+          [ -n "$MATCH_GIT_URL" ]                || missing+=(MATCH_GIT_URL)
+          [ -n "${{ secrets.MATCH_REPO_KEY }}" ] || missing+=(MATCH_REPO_KEY)
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing secrets: ${missing[*]}. Add them under Settings → Secrets and variables → Actions; if this run came through workflow_call, ensure the caller uses 'secrets: inherit'. See docs/FASTLANE-MIGRATION.md."
+            exit 1
+          fi
+
+      # Read-only SSH deploy key so match can `git clone` the private signing repo.
+      - name: Load match repo SSH key
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.MATCH_REPO_KEY }}
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          xcodebuild -version
+
+      - name: Set up Ruby + bundler cache
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+
+      # Generate the Xcode project from extension/ with Apple's converter, sync
+      # signing (match), archive, export, verify the shipped IPA, and upload to
+      # TestFlight — all in the beta lane, so a Mac can reproduce it with
+      # `bundle exec fastlane build`.
+      - name: Build & upload to TestFlight
+        run: bundle exec fastlane beta
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastlane-logs
+          path: |
+            ~/Library/Logs/gym
+            fastlane/report.xml
+          if-no-files-found: ignore
+
+  # ── Changelog + GitHub Release (git-only, cheap ubuntu) ─────────────────────
+  # Runs only after a successful upload, so a failed build never publishes a
+  # release. No version-bump commit: the tag is the only source of the version
+  # (fastlane stamps it into the generated project), so nothing tracked changes.
+  publish:
+    name: Changelog & GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.build.outputs.tag }}
+      VERSION_NUM: ${{ needs.build.outputs.version_num }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Find previous tag
         run: |
-          PREV_TAG=$(git describe --abbrev=0 --tags HEAD~1 2>/dev/null || git describe --abbrev=0 --tags 2>/dev/null || echo "")
+          PREV_TAG=$(git describe --abbrev=0 --tags "${TAG}^" 2>/dev/null || echo "")
           echo "PREV_TAG=$PREV_TAG" >> "$GITHUB_ENV"
 
       - name: Generate changelog
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ -z "${{ env.PREV_TAG }}" ]; then
+          if [ -z "$PREV_TAG" ]; then
             CHANGELOG="(initial release)"
           else
-            CHANGELOG=$(gh api repos/${{ github.repository }}/compare/${{ env.PREV_TAG }}...${{ env.TAG }} \
+            CHANGELOG=$(gh api "repos/${{ github.repository }}/compare/${PREV_TAG}...${TAG}" \
               --jq '.commits | reverse | .[] | "• \(.commit.message | split("\n")[0]) (\(.author.login // .commit.author.name))"' \
               2>/dev/null || echo "")
             if [ -z "$CHANGELOG" ]; then
-              CHANGELOG=$(git log ${{ env.PREV_TAG }}..${{ env.TAG }} --pretty="• %s (%an)" 2>/dev/null || echo "(no changes detected)")
+              CHANGELOG=$(git log "${PREV_TAG}..${TAG}" --pretty="• %s (%an)" 2>/dev/null || echo "(no changes detected)")
             fi
           fi
           {
@@ -70,171 +169,11 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_ENV"
 
-      - name: Select Xcode
-        run: |
-          sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
-          xcodebuild -version
-
-      # ── Generate the Xcode project from the web extension ──────────────────
-      # The product is a plain MV3 web extension; Apple's converter wires up the
-      # container App + Web Extension appex targets. Generating at build time
-      # keeps a fragile, machine-authored .xcodeproj out of the repo.
-      - name: Convert web extension to Xcode project
-        run: |
-          xcrun safari-web-extension-converter extension \
-            --ios-only \
-            --project-location "$RUNNER_TEMP/gen" \
-            --app-name "$APP_NAME" \
-            --bundle-identifier "$BUNDLE_ID" \
-            --no-open --no-prompt --force
-          PROJ=$(find "$RUNNER_TEMP/gen" -maxdepth 3 -name "*.xcodeproj" | head -1)
-          if [ -z "$PROJ" ]; then echo "No .xcodeproj generated" >&2; exit 1; fi
-          echo "PROJ=$PROJ" >> "$GITHUB_ENV"
-          echo "Generated project: $PROJ"
-          xcodebuild -list -project "$PROJ"
-
-      - name: Normalise parent app bundle identifier to lowercase
-        run: |
-          PBXPROJ=$(find "$RUNNER_TEMP/gen" -name "project.pbxproj" | head -1)
-          # The converter derives the parent app's PRODUCT_BUNDLE_IDENTIFIER from
-          # --app-name (Shreddit → com.ssalonen.Shreddit, capital S) rather than
-          # from --bundle-identifier (com.ssalonen.shreddit, lowercase s).
-          # This causes two failures:
-          #   1. Xcode ValidateEmbeddedBinary: case-sensitive prefix check fails
-          #      because com.ssalonen.shreddit.Extension ≠ com.ssalonen.Shreddit.*
-          #   2. SideStore re-signing: uses altstore-source.json bundleIdentifier
-          #      (com.ssalonen.shreddit, lowercase) as the prefix to strip/replace
-          #      in extension bundle IDs.  Case mismatch causes it to use the
-          #      parent's re-signed ID for the extension too, making both identical.
-          # Fix: normalise the parent's ID to lowercase so it matches --bundle-identifier.
-          sed -i '' \
-            's/PRODUCT_BUNDLE_IDENTIFIER = com\.ssalonen\.Shreddit;/PRODUCT_BUNDLE_IDENTIFIER = com.ssalonen.shreddit;/g' \
-            "$PBXPROJ"
-          echo "Bundle identifiers after patch:"
-          grep "PRODUCT_BUNDLE_IDENTIFIER" "$PBXPROJ"
-
-      - name: Pick app scheme
-        run: |
-          SCHEME=$(xcodebuild -list -project "$PROJ" -json | python3 -c "
-          import json, sys, os
-          app = os.environ['APP_NAME']
-          schemes = json.load(sys.stdin)['project']['schemes']
-          # Prefer the iOS app scheme; converter names it '<App> (iOS)' or '<App>'.
-          for cand in (f'{app} (iOS)', app):
-              if cand in schemes:
-                  print(cand); break
-          else:
-              # Fall back to the first scheme that isn't an extension/test target.
-              print(next((s for s in schemes if 'Extension' not in s and 'Test' not in s), schemes[0]))
-          ")
-          echo "SCHEME=$SCHEME" >> "$GITHUB_ENV"
-          echo "Using scheme: $SCHEME"
-
-      # ── Build an unsigned archive ──────────────────────────────────────────
-      # No Apple Developer team: disable code signing entirely so Xcode skips
-      # ValidateEmbeddedBinary (which fails for the embedded appex with ad-hoc
-      # signing and no team in Xcode 15+). SideStore/AltStore strips and
-      # re-signs the IPA with the user's own Apple ID on install.
-      - name: Build archive (unsigned)
-        run: |
-          xcodebuild archive \
-            -project "$PROJ" \
-            -scheme "$SCHEME" \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -archivePath "$RUNNER_TEMP/$APP_NAME.xcarchive" \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            DEVELOPMENT_TEAM="" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            MARKETING_VERSION="${VERSION_NUM}" \
-            CURRENT_PROJECT_VERSION="${VERSION_NUM}"
-
-      - name: Package IPA
-        run: |
-          APP_PATH=$(find "$RUNNER_TEMP/$APP_NAME.xcarchive" -name "*.app" -maxdepth 4 | head -1)
-          if [ -z "$APP_PATH" ]; then echo "No .app in archive" >&2; exit 1; fi
-          mkdir -p "$RUNNER_TEMP/Payload"
-          cp -r "$APP_PATH" "$RUNNER_TEMP/Payload/"
-          cd "$RUNNER_TEMP"
-          zip -r "$APP_NAME.ipa" Payload/
-          echo "IPA_PATH=$RUNNER_TEMP/$APP_NAME.ipa" >> "$GITHUB_ENV"
-          echo "IPA_SIZE=$(wc -c < "$APP_NAME.ipa" | tr -d ' ')" >> "$GITHUB_ENV"
-
-      - name: Update altstore-source.json
-        run: |
-          export DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/${APP_NAME}.ipa"
-          export DATE="$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")"
-
-          python3 - <<'PYEOF'
-          import json, os, shutil
-
-          version_num  = os.environ["VERSION_NUM"]
-          ipa_size     = int(os.environ["IPA_SIZE"])
-          download_url = os.environ["DOWNLOAD_URL"]
-          date         = os.environ["DATE"]
-
-          with open("altstore-source.json") as f:
-              source = json.load(f)
-
-          app = source["apps"][0]
-
-          new_entry = {
-              "version": version_num,
-              "date": date,
-              "localizedDescription": "See GitHub release notes.",
-              "downloadURL": download_url,
-              "size": ipa_size,
-              "minOSVersion": "15.0",
-          }
-
-          # Remove any existing entry for this version, then prepend fresh one.
-          app["versions"] = [v for v in app.get("versions", []) if v["version"] != version_num]
-          app["versions"].insert(0, new_entry)
-
-          # Top-level fields SideStore/AltStore read to determine latest version.
-          app["version"] = version_num
-          app["versionDate"] = date
-          app["versionDescription"] = "See GitHub release notes."
-          app["downloadURL"] = download_url
-          app["size"] = ipa_size
-
-          with open("altstore-source.json", "w") as f:
-              json.dump(source, f, indent=2)
-              f.write("\n")
-          # Stash a copy so the commit step can apply it after switching to main.
-          shutil.copy("altstore-source.json", os.path.join(os.environ["RUNNER_TEMP"], "altstore-source.json"))
-
-          print(f"Updated source to {version_num} ({ipa_size} bytes)")
-          PYEOF
-
-      - name: Commit updated source JSON
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
-          # Switch to main so the JSON update lands on the default branch.
-          git fetch origin main
-          git checkout main
-          # Re-apply the Python-generated JSON (it was written on the tag checkout).
-          cp "$RUNNER_TEMP/altstore-source.json" altstore-source.json
-          git add altstore-source.json
-          if git diff --cached --quiet; then
-            echo "No changes to altstore-source.json"
-          else
-            # [skip ci] keeps this bot commit from starting a CI run. A run would
-            # be harmless (a lone chore commit is non-releasable, so
-            # compute-version would skip), but skipping saves runner minutes.
-            git commit -m "chore: update AltStore source for ${TAG} [skip ci]"
-            git push origin HEAD:main
-          fi
-
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.TAG }}
-          name: "Shreddit ${{ env.VERSION_NUM }}"
+          name: "Keep Scrolling ${{ env.VERSION_NUM }}"
           body: |
             ## Changes since ${{ env.PREV_TAG }}
 
@@ -242,18 +181,13 @@ jobs:
 
             ---
 
-            ## Install via SideStore / AltStore
+            ## Install
 
-            **Add this source URL in SideStore/AltStore:**
-            ```
-            https://raw.githubusercontent.com/${{ github.repository }}/main/altstore-source.json
-            ```
+            Build `${{ env.VERSION_NUM }} (${{ github.run_number }})` was uploaded to
+            [TestFlight](https://appstoreconnect.apple.com/). Once Apple finishes
+            processing (usually 5-15 min) it is available to internal testers
+            immediately, or to external testers after Beta App Review.
 
-            Or [download the IPA directly](https://github.com/${{ github.repository }}/releases/download/${{ env.TAG }}/Shreddit.ipa) and open it in SideStore/AltStore.
-
-            After installing: **Settings ▸ Apps ▸ Safari ▸ Extensions ▸ Shreddit** → enable, set reddit.com to **Allow** (Allow Always avoids the per-visit prompt).
-
-            ---
-            *Unsigned build — SideStore/AltStore will sign it with your Apple ID on install.*
-          files: ${{ env.IPA_PATH }}
-          fail_on_unmatched_files: true
+            After installing: **Settings ▸ Apps ▸ Safari ▸ Extensions ▸ Keep
+            Scrolling** → enable, set reddit.com to **Allow** (Allow Always
+            avoids the per-visit prompt).
