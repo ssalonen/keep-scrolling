@@ -10,6 +10,7 @@ import { dirname, join } from 'node:path';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const script = readFileSync(join(root, 'extension', 'block-reddit-nag.js'), 'utf8');
+const scriptX = readFileSync(join(root, 'extension', 'block-x-nag.js'), 'utf8');
 const manifest = JSON.parse(readFileSync(join(root, 'extension', 'manifest.json'), 'utf8'));
 
 test('content script is syntactically valid', () => {
@@ -49,13 +50,63 @@ test('does not over-block faceplate-loader beyond AppUpsellBlocking', () => {
   assert.equal(scoped, total, 'all faceplate-loader selectors must be AppUpsellBlocking-scoped');
 });
 
-test('manifest is MV3 and scoped to reddit.com at document_start', () => {
+function findContentScript(matchPattern) {
+  return manifest.content_scripts?.find((cs) => cs.matches?.includes(matchPattern));
+}
+
+test('manifest is MV3 with exactly two content scripts', () => {
   assert.equal(manifest.manifest_version, 3);
-  const cs = manifest.content_scripts?.[0];
-  assert.ok(cs, 'content_scripts[0] missing');
+  assert.equal(manifest.content_scripts?.length, 2);
+});
+
+test('Reddit content script is scoped to reddit.com at document_start', () => {
+  const cs = findContentScript('*://*.reddit.com/*');
+  assert.ok(cs, 'reddit content script entry missing');
   assert.deepEqual(cs.matches, ['*://*.reddit.com/*']);
   assert.deepEqual(cs.js, ['block-reddit-nag.js']);
   assert.equal(cs.run_at, 'document_start');
+});
+
+test('X content script is scoped to x.com and twitter.com at document_start', () => {
+  const cs = findContentScript('*://*.x.com/*');
+  assert.ok(cs, 'X content script entry missing');
+  assert.deepEqual(cs.matches, ['*://*.x.com/*', '*://*.twitter.com/*']);
+  assert.deepEqual(cs.js, ['block-x-nag.js']);
+  assert.equal(cs.run_at, 'document_start');
+});
+
+test('X content script is syntactically valid', () => {
+  assert.doesNotThrow(() => new Function(scriptX));
+});
+
+test('X script matches the app-upsell banner by its purpose-built href/download marker', () => {
+  for (const sig of ['download', 'launch_app_store=true', "closest('aside')"]) {
+    assert.ok(scriptX.includes(sig), `missing marker: ${sig}`);
+  }
+});
+
+test('X script never matches on <aside> or role=region alone (must not catch cookie-consent banner)', () => {
+  assert.ok(
+    !/document\.querySelectorAll\(\s*['"]aside['"]\s*\)/.test(scriptX),
+    'must not query bare <aside> — would catch the unrelated cookie-consent banner',
+  );
+  assert.ok(
+    !/querySelectorAll\([^)]*role=/.test(scriptX),
+    'must not select on role=region — would catch the unrelated cookie-consent banner',
+  );
+});
+
+test('X script releases scroll only when the banner is found', () => {
+  assert.ok(/function\s+releaseScroll/.test(scriptX), 'releaseScroll() must exist');
+  assert.ok(/function\s+killNags/.test(scriptX), 'killNags() must exist');
+  assert.ok(
+    /if\s*\(\s*hit\s*\)\s*releaseScroll\(\)/.test(scriptX),
+    'releaseScroll() must be gated on hit, unlike the unconditional Reddit release',
+  );
+});
+
+test('X script stays reactive via MutationObserver', () => {
+  assert.ok(scriptX.includes('MutationObserver'));
 });
 
 test('manifest icons exist on disk', () => {

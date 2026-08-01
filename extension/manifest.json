@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Keep Scrolling",
   "version": "1.0",
-  "description": "Removes Reddit's app-install blocking sheet and restores scrolling.",
+  "description": "Removes Reddit's and X/Twitter's app-install nags and restores scrolling.",
   "icons": {
     "48": "icon-48.png",
     "96": "icon-96.png",
@@ -12,6 +12,12 @@
     {
       "matches": ["*://*.reddit.com/*"],
       "js": ["block-reddit-nag.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    },
+    {
+      "matches": ["*://*.x.com/*", "*://*.twitter.com/*"],
+      "js": ["block-x-nag.js"],
       "run_at": "document_start",
       "all_frames": false
     }

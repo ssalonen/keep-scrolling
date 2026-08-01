@@ -156,13 +156,14 @@ against the inputs that produced it:
 4. the app declares `ITSAppUsesNonExemptEncryption` — a missing value fails
    *open*: the upload succeeds and the build then sits in "Missing Compliance"
    until a human notices
-5. `block-reddit-nag.js` and `manifest.json` are actually inside the appex
+5. `block-reddit-nag.js`, `block-x-nag.js`, and `manifest.json` are actually
+   inside the appex
 
-(4) is the one that matters most: a correctly signed, correctly versioned IPA
+(5) is the one that matters most: a correctly signed, correctly versioned IPA
 containing **no extension code** would sail through to TestFlight and simply do
 nothing on device. This is the reference repo's central lesson — *a check whose
 expectation comes from the same source as the thing being checked is not a
-check* — so all four read the shipped artifact.
+check* — so all five read the shipped artifact.
 
 ## Secrets
 

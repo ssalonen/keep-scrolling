@@ -11,8 +11,8 @@ permissions:
 
 jobs:
   # ── Lint + guard the content-script invariants ─────────────────────────────
-  # The product is one vanilla-JS content script, so CI is fast and Linux-only:
-  # syntax-check it and run the node:test guards that lock in the CLAUDE.md
+  # The product is two vanilla-JS content scripts, so CI is fast and Linux-only:
+  # syntax-check them and run the node:test guards that lock in the CLAUDE.md
   # invariants (remove the sheet AND release the scroll-lock; match by stable
   # signatures; don't over-block faceplate-loader).
   test:
@@ -27,8 +27,10 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Syntax-check content script
-        run: node --check extension/block-reddit-nag.js
+      - name: Syntax-check content scripts
+        run: |
+          node --check extension/block-reddit-nag.js
+          node --check extension/block-x-nag.js
 
       - name: Validate manifest.json parses
         run: node -e "JSON.parse(require('fs').readFileSync('extension/manifest.json','utf8'))"

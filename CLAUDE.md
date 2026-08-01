@@ -14,25 +14,30 @@ because match's signing repo is per-team.
   `APP_NAME` leaks into every build path.
 
 Removes Reddit's "Get the app to keep using Reddit" blocking sheet on mobile
-Safari and restores scrolling. The single content script
-`extension/block-reddit-nag.js` does all the work. Full background and
-references: @docs/reddit-nag-remover-plan.md
+Safari and restores scrolling, via `extension/block-reddit-nag.js`. Also
+removes X/Twitter's logged-out "Open X App" banner and its scroll lock, via
+the independent `extension/block-x-nag.js`. Full background and references:
+@docs/reddit-nag-remover-plan.md and @docs/x-nag-remover-plan.md
 
 ## Layout
-- `extension/block-reddit-nag.js` — the content script (the whole product). Runs
-  at `document_start` on `*://*.reddit.com/*`.
-- `extension/manifest.json` — MV3 manifest declaring the content script.
+- `extension/block-reddit-nag.js` — the Reddit content script. Runs at
+  `document_start` on `*://*.reddit.com/*`.
+- `extension/block-x-nag.js` — the X/Twitter content script. Runs at
+  `document_start` on `*://*.x.com/*` and `*://*.twitter.com/*`. Independent
+  of the Reddit script — see the "X/Twitter nag" section below.
+- `extension/manifest.json` — MV3 manifest declaring both content scripts.
 - `extension/icon-{48,96,128}.png` — extension icons.
 - `.github/workflows/` — CI/CD (see below).
 - `fastlane/` — `Fastfile` (lanes: `certificates`, `build`, `beta`), `Appfile`,
   `Matchfile`. Signing + release live here, not in workflow bash.
 - `Gemfile` — pins fastlane.
 - `test/extension.test.js` — `node:test` invariant guards (no dependencies).
-- `docs/reddit-nag-remover-plan.md` — diagnosis, build steps, references.
+- `docs/reddit-nag-remover-plan.md` — Reddit diagnosis, build steps, references.
+- `docs/x-nag-remover-plan.md` — X/Twitter diagnosis and caveats.
 - `docs/FASTLANE-MIGRATION.md` — signing/release pipeline, manual setup steps.
 
 ## Build / release / test
-- **CI** (`ci.yml`): on every push/PR, syntax-checks the script and runs
+- **CI** (`ci.yml`): on every push/PR, syntax-checks both scripts and runs
   `node --test`. On a green push to `main`, computes the next semver from
   Conventional Commits and triggers a release.
 - **Release** (`release.yml`): on a `v*` tag (or `workflow_call`), a macOS `build`
@@ -84,6 +89,32 @@ host; the live variant is `-seo`, so its fog and scroll-lock pass through.
 - Keep the `MutationObserver` reactive design: the sheet is injected late and can
   re-inject; one-shot removal is not enough.
 - `test/extension.test.js` enforces these invariants in CI — keep it green.
+
+## X/Twitter nag (`extension/block-x-nag.js`)
+Removes X's logged-out "Open X App" bottom banner (an `<aside>` containing
+`a[download][href*="launch_app_store=true"]`, component internally named
+`logged-out-open-app-banner`) and releases the body's inline
+`overflow:hidden` scroll lock. This is an independent content script scoped
+to `*://*.x.com/*` and `*://*.twitter.com/*` — it deliberately does **not**
+share code with the Reddit script (see `docs/x-nag-remover-plan.md` for why).
+
+- Match by the `download` + `launch_app_store=true` marker on the anchor,
+  then `.closest('aside')` to remove the whole banner — NOT by the
+  surrounding Tailwind utility classes (cosmetic, retouch-prone) and NOT by
+  bare `<aside>` or `role="region"` — the page also has an unrelated,
+  legally-required cookie-consent banner that must never be touched.
+- Unlike Reddit, `releaseScroll()` here only runs when the banner was found
+  this pass. X's inline `overflow:hidden` idiom is likely reused by
+  unrelated legitimate modals (compose box, image viewer), so releasing it
+  unconditionally risks fighting those.
+- The injected CSS backstop uses `:has()` (iOS/Safari 16.4+); the JS
+  `killNags()` removal path via `MutationObserver` doesn't depend on it and
+  still works on older iOS, just without the early-hide race protection.
+- **Best-effort first pass**: derived from a single static HTML snapshot, not
+  yet verified on-device. If a variant slips through, capture a fresh
+  snapshot, confirm the anchor still has `download` + `launch_app_store=true`
+  (or find its new marker), and update `APP_BANNER_LINK_SELECTOR` — same
+  one-line-of-maintenance goal as Reddit's `NAG_SELECTORS`.
 
 ## Conventions
 - Vanilla JS only, no dependencies, no build step for the script itself.
