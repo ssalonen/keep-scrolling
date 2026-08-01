@@ -1,0 +1,361 @@
+# fastlane lanes for Keep Scrolling (iOS only).
+#
+# `beta` is the release lane (called by release.yml): generate the Xcode project
+# from the web extension, sync signing, build a signed IPA, verify it actually
+# ships the content script at the right bundle IDs and version, and upload to
+# TestFlight. `build` does everything except the upload (local sanity check).
+# `certificates` seeds/syncs signing from a Mac.
+#
+# Unlike a normal iOS repo there is NO committed .xcodeproj: Apple's
+# safari-web-extension-converter generates the container app + extension appex
+# targets at build time from extension/. Everything the old release.yml did in
+# inline bash (convert, patch bundle IDs, pick a scheme, archive, package) lives
+# here instead, so `bundle exec fastlane build` reproduces CI on a Mac.
+
+default_platform(:ios)
+
+# Xcode-facing name: drives the generated project, scheme, target, .app and .ipa
+# filenames, so it deliberately has NO space — spaces there leak into every path
+# and shell invocation downstream for no benefit.
+APP_NAME = "KeepScrolling"
+# What users actually see (home screen, Settings, Safari's extension list). Set
+# as CFBundleDisplayName; independent of APP_NAME and of the bundle ID.
+APP_DISPLAY_NAME = "Keep Scrolling"
+# fi.mailhub.* matches the other apps under this Apple team (and the domain
+# actually owned), which matters because match's signing repo is per-team.
+APP_ID   = "fi.mailhub.keepscrolling"
+# The converter nests the appex under the container app. We *set* this suffix
+# explicitly rather than reading whatever the converter chose, so it can never
+# drift out of sync with the Matchfile (match must have a profile for it).
+EXT_ID   = "#{APP_ID}.Extension"
+
+# Repo root. fastlane runs lanes with its CWD set to the fastlane/ dir, so a
+# CWD-relative path would resolve to fastlane/… — wrong. Anchor every repo-file
+# reference here instead. On CI this is the checkout root (GITHUB_WORKSPACE);
+# locally, the parent of this Fastfile's directory.
+REPO_ROOT     = ENV["GITHUB_WORKSPACE"] || File.expand_path("..", __dir__)
+EXTENSION_DIR = File.join(REPO_ROOT, "extension")
+BUILD_DIR     = File.join(REPO_ROOT, "build")
+GEN_DIR       = File.join(BUILD_DIR, "gen")
+
+# The one file that is the actual product — verified present in the shipped IPA.
+CONTENT_SCRIPT = "block-reddit-nag.js"
+
+platform :ios do
+  desc "Sync signing material (read-only on CI) without building anything"
+  lane :certificates do
+    # force: true so this also creates a dedicated, password-known keychain when
+    # run locally (e.g. seeding from a Mac). Without it, match installs into the
+    # login keychain and can't run `security set-key-partition-list`
+    # non-interactively — the identity never forms and match reports "could not
+    # find the newly generated certificate installed" (errSecInternalComponent).
+    setup_ci(force: true)
+    match(api_key: asc_api_key, type: "appstore", readonly: FastlaneCore::Helper.ci?)
+  end
+
+  desc "Build a signed IPA without uploading (local signing sanity check)"
+  lane :build do
+    setup_ci if FastlaneCore::Helper.ci?
+    ipa = build_signed_ipa(asc_api_key)
+    UI.success("Built #{ipa}")
+  end
+
+  desc "Build and upload a signed build to TestFlight"
+  lane :beta do
+    setup_ci
+    key = asc_api_key
+    ipa = build_signed_ipa(key)
+    upload_to_testflight(
+      api_key: key,
+      ipa: ipa,
+      # Internal testers only — don't submit for external Beta App Review, and
+      # don't block CI while App Store Connect processes the build.
+      skip_submission: true,
+      skip_waiting_for_build_processing: true,
+    )
+  end
+end
+
+# Generate the Xcode project, sync signing, produce a signed App-Store IPA,
+# verify it, and return its absolute path (for upload_to_testflight).
+# MARKETING_VERSION comes from release.yml (the git tag); the build number is the
+# CI run number, which must be unique and increasing for App Store Connect.
+def build_signed_ipa(key)
+  marketing_version = ENV["MARKETING_VERSION"] || "0.0.1"
+  build_number      = ENV["GITHUB_RUN_NUMBER"] || "1"
+
+  project, scheme, app_target, ext_target =
+    generate_project(marketing_version, build_number)
+
+  # readonly by default. To regenerate profiles from CI after changing App-ID
+  # capabilities (instead of re-seeding from a Mac), run the "Bump version and
+  # make a release" workflow with match_readonly: 'false' — that plumbs
+  # MATCH_READONLY through release.yml to here. Needs a *write* deploy key in
+  # MATCH_REPO_KEY and an API key allowed to manage profiles.
+  match(api_key: key, type: "appstore", readonly: ENV["MATCH_READONLY"] != "false")
+
+  # Stamp manual signing + the match profiles into the freshly generated
+  # project. The converter emits automatic signing with no team; overriding it
+  # per target here is what lets a team-less generated project build signed.
+  apply_signing(project, app_target, ENV.fetch("sigh_#{APP_ID}_appstore_profile-name"))
+  apply_signing(project, ext_target, ENV.fetch("sigh_#{EXT_ID}_appstore_profile-name"))
+
+  build_app(
+    project: project,
+    scheme: scheme,
+    configuration: "Release",
+    clean: true,
+    output_directory: BUILD_DIR,
+    output_name: "#{APP_NAME}.ipa",
+    export_method: "app-store",
+    export_options: {
+      method: "app-store",
+      signingStyle: "manual",
+      teamID: ENV.fetch("APPLE_TEAM_ID"),
+      signingCertificate: "Apple Distribution",
+      provisioningProfiles: {
+        APP_ID => ENV.fetch("sigh_#{APP_ID}_appstore_profile-name"),
+        EXT_ID => ENV.fetch("sigh_#{EXT_ID}_appstore_profile-name"),
+      },
+    },
+    xcargs: [
+      "MARKETING_VERSION=#{marketing_version}",
+      "CURRENT_PROJECT_VERSION=#{build_number}",
+      "DEVELOPMENT_TEAM=#{ENV.fetch('APPLE_TEAM_ID')}",
+    ].join(" "),
+  )
+  ipa = Fastlane::Actions.lane_context[Fastlane::Actions::SharedValues::IPA_OUTPUT_PATH]
+
+  # Gate: fail before upload if the IPA is structurally wrong or misversioned.
+  verify_ipa(ipa, marketing_version, build_number)
+  ipa
+end
+
+# Run Apple's converter to produce the container app + extension appex targets,
+# then patch the generated project so it is fit to sign, version, and upload.
+# Returns [project_path, scheme, app_target_name, ext_target_name].
+#
+# The whole project is a build artifact under build/gen — it is regenerated from
+# scratch every run and never committed, so patching it here is safe (contrast
+# with a generator writing over a *tracked* file, which is what silently broke
+# every-byte-counts; see docs/FASTLANE-MIGRATION.md).
+def generate_project(marketing_version, build_number)
+  require "xcodeproj"
+
+  FileUtils.rm_rf(GEN_DIR)
+  FileUtils.mkdir_p(GEN_DIR)
+
+  sh(
+    "xcrun", "safari-web-extension-converter", EXTENSION_DIR,
+    "--ios-only",
+    "--project-location", GEN_DIR,
+    "--app-name", APP_NAME,
+    "--bundle-identifier", APP_ID,
+    "--no-open", "--no-prompt", "--force"
+  )
+
+  project_path = Dir.glob(File.join(GEN_DIR, "**", "*.xcodeproj")).min_by { |p| p.count(File::SEPARATOR) }
+  UI.user_error!("safari-web-extension-converter produced no .xcodeproj under #{GEN_DIR}") if project_path.nil?
+
+  proj = Xcodeproj::Project.open(project_path)
+  app  = find_target(proj, "com.apple.product-type.application", "container app")
+  ext  = find_target(proj, "com.apple.product-type.app-extension", "Safari extension appex")
+
+  # 1. Bundle identifiers. The converter builds the container app's id from
+  #    --bundle-identifier's PREFIX plus --app-name, not from
+  #    --bundle-identifier itself: here that yields fi.mailhub.KeepScrolling
+  #    (capital K) against a real id of fi.mailhub.keepscrolling. That exact
+  #    class of case mismatch broke Xcode's case-sensitive
+  #    ValidateEmbeddedBinary check before (commit 8c1f2c9), and note that
+  #    lowercasing our own id does NOT avoid it — the converter still invents a
+  #    capitalised one. Forcing both ids here is what actually fixes it, and it
+  #    also guarantees they line up with the profiles match minted.
+  set_build_setting(app, "PRODUCT_BUNDLE_IDENTIFIER", APP_ID)
+  set_build_setting(ext, "PRODUCT_BUNDLE_IDENTIFIER", EXT_ID)
+
+  # 2. Versioning and display name. App Store Connect reads
+  #    CFBundleShortVersionString / CFBundleVersion from each Info.plist and
+  #    rejects a duplicate build number, so the tag version MUST reach the
+  #    binary. The converter writes the literal manifest.json version ("1.0")
+  #    into Info.plist, where an xcargs MARKETING_VERSION would be ignored —
+  #    repoint those keys at the build settings so the override actually lands.
+  #    CFBundleDisplayName is set here too, so the user-visible name is
+  #    independent of the space-free APP_NAME that drives the build paths.
+  [app, ext].each do |target|
+    set_build_setting(target, "MARKETING_VERSION", marketing_version)
+    set_build_setting(target, "CURRENT_PROJECT_VERSION", build_number)
+    # The converter emits GENERATE_INFOPLIST_FILE=YES *alongside* an
+    # INFOPLIST_FILE, which makes Xcode merge the INFOPLIST_KEY_* build settings
+    # over the file's contents. It also sets
+    # INFOPLIST_KEY_CFBundleDisplayName=<APP_NAME>, so the display name written
+    # into the file by patch_infoplist is silently overridden and the IPA ships
+    # "KeepScrolling" instead of "Keep Scrolling". Set the build setting too —
+    # it is the one that actually wins. (The version keys need no equivalent:
+    # they have no INFOPLIST_KEY_*, so the file's $(MARKETING_VERSION) /
+    # $(CURRENT_PROJECT_VERSION) resolve against the settings set just above.)
+    set_build_setting(target, "INFOPLIST_KEY_CFBundleDisplayName", APP_DISPLAY_NAME)
+    patch_infoplist(proj, target)
+  end
+
+  proj.save
+
+  [project_path, pick_scheme(project_path), app.name, ext.name]
+end
+
+def find_target(proj, product_type, description)
+  targets = proj.targets.select { |t| t.respond_to?(:product_type) && t.product_type == product_type }
+  if targets.size != 1
+    UI.user_error!(
+      "Expected exactly 1 #{description} target (#{product_type}) in the generated " \
+      "project, found #{targets.size}: #{targets.map(&:name).inspect}. " \
+      "safari-web-extension-converter's output layout changed — update generate_project."
+    )
+  end
+  targets.first
+end
+
+def set_build_setting(target, key, value)
+  target.build_configurations.each { |c| c.build_settings[key] = value }
+end
+
+# Point the target's Info.plist version keys at the build settings, so the xcargs
+# overrides in build_app are authoritative, and stamp the user-visible display
+# name. A no-op when the target uses GENERATE_INFOPLIST_FILE (no file to patch —
+# the settings are already the source of truth); verify_ipa is what proves the
+# values reached the shipped binary either way.
+#
+# NOTE: the display name written here is NOT sufficient on its own — the
+# converter also sets INFOPLIST_KEY_CFBundleDisplayName, which Xcode merges on
+# top of this file. generate_project overrides that build setting for the same
+# reason; keep both in sync.
+def patch_infoplist(proj, target)
+  rel = target.build_configurations
+              .map { |c| c.build_settings["INFOPLIST_FILE"] }
+              .compact.first
+  return if rel.nil?
+
+  path = File.expand_path(rel, File.dirname(proj.path))
+  unless File.exist?(path)
+    UI.important("INFOPLIST_FILE #{rel} for #{target.name} does not exist — skipping version repoint")
+    return
+  end
+
+  plist = Xcodeproj::Plist.read_from_path(path)
+  plist["CFBundleShortVersionString"] = "$(MARKETING_VERSION)"
+  plist["CFBundleVersion"]            = "$(CURRENT_PROJECT_VERSION)"
+  plist["CFBundleDisplayName"]        = APP_DISPLAY_NAME
+  Xcodeproj::Plist.write_to_path(plist, path)
+end
+
+# Prefer the iOS app scheme; the converter names it '<App>' or '<App> (iOS)'.
+def pick_scheme(project_path)
+  schemes = Xcodeproj::Project.schemes(project_path)
+  UI.user_error!("No schemes in #{project_path}") if schemes.empty?
+  scheme = [APP_NAME, "#{APP_NAME} (iOS)"].find { |c| schemes.include?(c) } ||
+           schemes.find { |s| !s.include?("Extension") } ||
+           schemes.first
+  UI.message("Using scheme: #{scheme}")
+  scheme
+end
+
+def apply_signing(project, target, profile_name)
+  update_code_signing_settings(
+    path: project,
+    use_automatic_signing: false,
+    team_id: ENV.fetch("APPLE_TEAM_ID"),
+    code_sign_identity: "Apple Distribution",
+    profile_name: profile_name,
+    targets: [target],
+    build_configurations: ["Release"],
+  )
+end
+
+# Inspect the exported IPA and fail unless it is what we intend to ship. The
+# converter is a black box that runs fresh on every release, so these are the
+# invariants that a converter change (or a bad patch above) would break —
+# checked against the *shipped artifact*, not against the inputs that produced
+# it, so a patch silently failing to apply is caught rather than confirmed.
+#
+#   1. exactly one .app with the expected bundle id
+#   2. exactly one embedded .appex, its id correctly nested under the app's
+#      (the case-mismatch bug that broke ValidateEmbeddedBinary and re-signing)
+#   3. both carry the tag's version + this run's build number, or App Store
+#      Connect rejects the upload as a duplicate build
+#   4. both carry the user-visible display name — the space-free APP_NAME drives
+#      the build paths, so this is the only thing proving the real name shipped
+#   5. the content script and manifest are actually inside the appex — a signed,
+#      correctly-versioned IPA containing no extension code would otherwise sail
+#      through to TestFlight and simply do nothing on device
+def verify_ipa(ipa, marketing_version, build_number)
+  # Explicitly bash, not fastlane's default shell: this script uses arrays and
+  # nullglob to count matches, which POSIX sh does not have.
+  sh("bash", "-c", <<~BASH)
+    set -euo pipefail
+    WORK="$(mktemp -d)"
+    unzip -qo "#{ipa}" -d "$WORK"
+
+    shopt -s nullglob
+    apps=("$WORK/Payload/"*.app)
+    [ "${#apps[@]}" -eq 1 ] || { echo "::error::expected 1 .app in the IPA, found ${#apps[@]}"; exit 1; }
+    APP="${apps[0]}"
+
+    appexes=("$APP/PlugIns/"*.appex)
+    [ "${#appexes[@]}" -eq 1 ] || { echo "::error::expected 1 embedded .appex, found ${#appexes[@]}. The Safari extension is missing from the container app — the shipped app would do nothing."; exit 1; }
+    EXT="${appexes[0]}"
+
+    plist_get() { /usr/libexec/PlistBuddy -c "Print :$2" "$1/Info.plist"; }
+
+    check_id() {
+      got="$(plist_get "$1" CFBundleIdentifier)"
+      [ "$got" = "$2" ] || { echo "::error::$(basename "$1"): CFBundleIdentifier is '$got', expected '$2'. Signing profiles are keyed on the bundle id, so this ships mis-signed."; exit 1; }
+    }
+    check_id "$APP" "#{APP_ID}"
+    check_id "$EXT" "#{EXT_ID}"
+
+    # Case-sensitive nesting: iOS requires the appex id to be prefixed by the
+    # container app's id, and a case mismatch here is exactly what broke
+    # ValidateEmbeddedBinary before.
+    case "#{EXT_ID}" in
+      "#{APP_ID}".*) ;;
+      *) echo "::error::extension id '#{EXT_ID}' is not nested under app id '#{APP_ID}'"; exit 1 ;;
+    esac
+
+    check_version() {
+      short="$(plist_get "$1" CFBundleShortVersionString)"
+      build="$(plist_get "$1" CFBundleVersion)"
+      echo "$(basename "$1"): version $short ($build)"
+      [ "$short" = "#{marketing_version}" ] || { echo "::error::$(basename "$1"): CFBundleShortVersionString is '$short', expected '#{marketing_version}'. The version override did not reach Info.plist, so App Store Connect would see the wrong version."; exit 1; }
+      [ "$build" = "#{build_number}" ] || { echo "::error::$(basename "$1"): CFBundleVersion is '$build', expected '#{build_number}'. App Store Connect rejects duplicate build numbers."; exit 1; }
+    }
+    check_version "$APP"
+    check_version "$EXT"
+
+    # The name users actually see. APP_NAME is deliberately space-free for the
+    # build paths, so nothing else would catch the display name regressing to it.
+    check_display_name() {
+      got="$(plist_get "$1" CFBundleDisplayName)"
+      [ "$got" = "#{APP_DISPLAY_NAME}" ] || { echo "::error::$(basename "$1"): CFBundleDisplayName is '$got', expected '#{APP_DISPLAY_NAME}'. The app would show the wrong name on the home screen and in Safari's extension list."; exit 1; }
+    }
+    check_display_name "$APP"
+    check_display_name "$EXT"
+
+    # The product itself must be in the appex's web resources.
+    for f in "#{CONTENT_SCRIPT}" manifest.json; do
+      find "$EXT" -name "$f" | grep -q . || { echo "::error::$f is not present in $(basename "$EXT") — the IPA would install an extension with no content script."; exit 1; }
+    done
+
+    echo "OK: IPA ships '#{APP_DISPLAY_NAME}' (#{APP_ID} + #{EXT_ID}) at #{marketing_version} (#{build_number}) with the content script"
+  BASH
+end
+
+# App Store Connect API key from the existing repo secrets. key_content is the
+# raw .p8 text (not base64), matching how APP_STORE_CONNECT_API_KEY_P8 is stored.
+def asc_api_key
+  app_store_connect_api_key(
+    key_id: ENV.fetch("APP_STORE_CONNECT_KEY_ID"),
+    issuer_id: ENV.fetch("APP_STORE_CONNECT_ISSUER_ID"),
+    key_content: ENV.fetch("APP_STORE_CONNECT_API_KEY_P8"),
+    is_key_content_base64: false,
+    in_house: false, # standard Developer Program, NOT enterprise
+  )
+end

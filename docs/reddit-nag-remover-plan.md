@@ -14,12 +14,16 @@ extension/
   icon-48.png / icon-96.png / icon-128.png
 .github/workflows/
   ci.yml                   <- lint + invariant tests + auto-release on green main
-  release.yml              <- build unsigned IPA + update AltStore source + GitHub Release
+  release.yml              <- sign with match + upload to TestFlight + GitHub Release
   bump-version.yml         <- manual workflow_dispatch version bump
   security.yml             <- CodeQL on the content script
+fastlane/
+  Fastfile                 <- lanes: certificates, build, beta
+  Appfile / Matchfile      <- bundle IDs, team, match git storage
+Gemfile                    <- pins fastlane
 docs/reddit-nag-remover-plan.md
-altstore-source.json       <- SideStore/AltStore source manifest (updated by CI)
-icon.png                   <- 512px icon for the AltStore source
+docs/FASTLANE-MIGRATION.md <- signing/release pipeline + one-time manual setup
+icon.png                   <- 512px icon
 test/extension.test.js     <- node:test invariant guards (no deps)
 ```
 
@@ -28,18 +32,29 @@ A content script scoped by `matches` is all that is needed — no `permissions`
 / `host_permissions` block. The user just toggles the extension on for
 reddit.com in Safari settings.
 
-## Build & distribution (CI → SideStore)
-This repo does **not** commit an Xcode project. The release workflow generates
-one at build time on a macOS runner with Apple's converter, then builds an
-**unsigned (ad-hoc) IPA** that SideStore/AltStore re-signs with your Apple ID:
+## Build & distribution (CI → TestFlight)
+This repo does **not** commit an Xcode project. `fastlane`'s `beta` lane
+generates one at build time on a macOS runner with Apple's converter, signs it
+with `match`, and uploads to TestFlight. Full detail — including the three things
+the converter gets wrong and the one-time manual setup — is in
+[`FASTLANE-MIGRATION.md`](FASTLANE-MIGRATION.md).
 
 1. `xcrun safari-web-extension-converter extension --ios-only ...` generates the
-   container App + Web Extension appex targets.
-2. `xcodebuild archive` with `CODE_SIGN_IDENTITY="-" AD_HOC_CODE_SIGNING_ALLOWED=YES`
-   builds a fake-signed archive (no Apple Developer team required).
-3. The `.app` is wrapped into `Payload/…app` and zipped to `Shreddit.ipa`.
-4. `altstore-source.json` is updated with the new version + download URL and a
-   GitHub Release is created with the IPA attached.
+   container App + Web Extension appex targets into `build/gen`.
+2. The Fastfile patches the generated project: forces both bundle IDs
+   (`fi.mailhub.keepscrolling` + `.Extension`) and repoints the `Info.plist` version
+   keys at `$(MARKETING_VERSION)` / `$(CURRENT_PROJECT_VERSION)`.
+3. `match` syncs the Apple Distribution cert + both App Store profiles; manual
+   signing is stamped onto each target.
+4. `gym` archives and exports a signed `app-store` IPA; `verify_ipa` asserts the
+   shipped artifact's bundle IDs, versions, and that the content script is
+   actually inside the appex.
+5. `upload_to_testflight` uploads it; a separate ubuntu job publishes the
+   changelog + GitHub Release.
+
+> Historical note: releases up to **v0.1.3** were unsigned ad-hoc IPAs
+> distributed through `altstore-source.json` and re-signed by SideStore/AltStore.
+> That path has been removed.
 
 ### Cutting a release
 - **Automatic:** merge a Conventional-Commit `feat:` / `fix:` to `main`. `ci.yml`
@@ -49,16 +64,18 @@ one at build time on a macOS runner with Apple's converter, then builds an
   v1.0.0 && git push origin v1.0.0`.
 
 ### Installing on iPhone
-Add this source URL in SideStore/AltStore:
-```
-https://raw.githubusercontent.com/ssalonen/shreddit/main/altstore-source.json
-```
-Install Shreddit, then on device: **Settings ▸ Apps ▸ Safari ▸ Extensions ▸
-Shreddit** → enable, set reddit.com to **Allow** (Allow Always avoids the
-per-visit prompt). The app re-signs every 7 days on a free Apple ID — SideStore
-refreshes it.
+Accept the TestFlight invite and install Keep Scrolling, then on device:
+**Settings ▸ Apps ▸ Safari ▸ Extensions ▸ Keep Scrolling** → enable, set
+reddit.com to **Allow** (Allow Always avoids the per-visit prompt). TestFlight
+builds expire after 90 days.
 
 ### Local build (optional, needs a Mac with Xcode)
+```
+bundle install
+bundle exec fastlane certificates                   # sync signing material
+MARKETING_VERSION=1.0.0 bundle exec fastlane build  # full pipeline, no upload
+```
+To poke at the raw converter output instead:
 ```
 xcrun safari-web-extension-converter ./extension --ios-only
 ```

@@ -1,27 +1,28 @@
-# Shreddit — Reddit Nag Remover
+# Keep Scrolling
 
 A Safari **Web Extension** for iOS/macOS that removes Reddit's *"Get the app to
 keep using Reddit"* blocking sheet on mobile Safari and restores scrolling.
+
+> Formerly *Shreddit* (`com.ssalonen.shreddit`) up to v0.1.3; now
+> `fi.mailhub.keepscrolling`.
 
 Unlike content-blocker rules (e.g. Sink It), it runs real JavaScript at
 `document_start`, **releases the body scroll-lock**, neutralizes the blocking
 bottom-sheet *and* its fog overlay, and **self-heals** against re-injection and
 Reddit's rotating element IDs.
 
-## Install on iPhone (SideStore / AltStore)
+## Install on iPhone (TestFlight)
 
-Add this source in SideStore/AltStore:
+Releases are signed and uploaded to **TestFlight**. Accept the tester invite,
+install **Keep Scrolling** from the TestFlight app, then:
 
-```
-https://raw.githubusercontent.com/ssalonen/shreddit/main/altstore-source.json
-```
-
-Install **Shreddit** (SideStore signs the unsigned IPA with your Apple ID), then:
-
-> **Settings ▸ Apps ▸ Safari ▸ Extensions ▸ Shreddit** → enable, and set
+> **Settings ▸ Apps ▸ Safari ▸ Extensions ▸ Keep Scrolling** → enable, and set
 > reddit.com to **Allow** (Allow Always avoids the per-visit prompt).
 
-You can also grab the IPA from the [Releases](../../releases) page directly.
+> **Note:** Shreddit previously shipped as an unsigned IPA installed through
+> SideStore/AltStore. That path is gone — the `altstore-source.json` source URL
+> no longer resolves, and existing SideStore installs will not update. TestFlight
+> builds expire after 90 days, so a fresh release is cut at least quarterly.
 
 ## How it works
 
@@ -46,8 +47,10 @@ full diagnosis and references.
 
 - `extension/` — the MV3 web extension (the whole product).
 - `test/extension.test.js` — `node:test` invariant guards; run with `node --test`.
-- No Xcode project is committed; CI generates one with
-  `xcrun safari-web-extension-converter` and builds an unsigned IPA.
+- `fastlane/` — signing (`match`) and release lanes; see
+  [`docs/FASTLANE-MIGRATION.md`](docs/FASTLANE-MIGRATION.md).
+- No Xcode project is committed; it is generated at build time with
+  `xcrun safari-web-extension-converter`, then signed by `match`.
 
 Releases are automated:
 
@@ -55,4 +58,15 @@ Releases are automated:
 - run the **Bump version and make a release** workflow and pick patch/minor/major, **or**
 - push a tag: `git tag v1.0.0 && git push origin v1.0.0`.
 
-*Unsigned builds — SideStore/AltStore signs them with your Apple ID on install.*
+### Local signing (needs a Mac with Xcode)
+
+```sh
+bundle install
+bundle exec fastlane certificates                  # sync signing material
+MARKETING_VERSION=1.0.0 bundle exec fastlane build  # full pipeline, no upload
+```
+
+`bundle exec fastlane beta` is what CI runs — it adds the TestFlight upload.
+First-time setup (App IDs, the App Store Connect record, the `match` signing repo
+and its secrets) is documented in
+[`docs/FASTLANE-MIGRATION.md`](docs/FASTLANE-MIGRATION.md).

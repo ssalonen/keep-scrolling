@@ -1,0 +1,4 @@
+# App Store Connect auth is done with an API key in the Fastfile (no Apple ID /
+# password / 2FA), so only the app identifier and team id live here.
+app_identifier("fi.mailhub.keepscrolling")
+team_id(ENV["APPLE_TEAM_ID"])
