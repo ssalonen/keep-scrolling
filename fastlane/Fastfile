@@ -194,6 +194,13 @@ def generate_project(marketing_version, build_number)
     # they have no INFOPLIST_KEY_*, so the file's $(MARKETING_VERSION) /
     # $(CURRENT_PROJECT_VERSION) resolve against the settings set just above.)
     set_build_setting(target, "INFOPLIST_KEY_CFBundleDisplayName", APP_DISPLAY_NAME)
+    # Export compliance. Without this key App Store Connect holds every build
+    # behind a manual "does your app use encryption?" question before it can
+    # reach testers. Declaring it in the binary answers that up front, so a
+    # release needs no console babysitting. NO is the accurate answer here: the
+    # content script only manipulates the DOM — it performs no encryption, and
+    # the app makes no network calls of its own.
+    set_build_setting(target, "INFOPLIST_KEY_ITSAppUsesNonExemptEncryption", "NO")
     patch_infoplist(proj, target)
   end
 
@@ -283,7 +290,9 @@ end
 #      Connect rejects the upload as a duplicate build
 #   4. both carry the user-visible display name — the space-free APP_NAME drives
 #      the build paths, so this is the only thing proving the real name shipped
-#   5. the content script and manifest are actually inside the appex — a signed,
+#   5. the app declares export compliance, so App Store Connect does not park
+#      the build behind a manual encryption question
+#   6. the content script and manifest are actually inside the appex — a signed,
 #      correctly-versioned IPA containing no extension code would otherwise sail
 #      through to TestFlight and simply do nothing on device
 def verify_ipa(ipa, marketing_version, build_number)
@@ -338,6 +347,13 @@ def verify_ipa(ipa, marketing_version, build_number)
     }
     check_display_name "$APP"
     check_display_name "$EXT"
+
+    # Export compliance. Only the container app's value is what App Store
+    # Connect reads, but a missing key is silent: the upload succeeds and the
+    # build then sits in "Missing Compliance" until someone answers the question
+    # by hand, which is exactly the toil this is meant to remove.
+    got="$(plist_get "$APP" ITSAppUsesNonExemptEncryption)"
+    [ "$got" = "false" ] || { echo "::error::$(basename "$APP"): ITSAppUsesNonExemptEncryption is '$got', expected 'false'. Without it App Store Connect holds the build behind a manual export-compliance question before testers can install it."; exit 1; }
 
     # The product itself must be in the appex's web resources.
     for f in "#{CONTENT_SCRIPT}" manifest.json; do
