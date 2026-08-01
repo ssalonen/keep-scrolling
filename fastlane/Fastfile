@@ -2,7 +2,7 @@
 #
 # `beta` is the release lane (called by release.yml): generate the Xcode project
 # from the web extension, sync signing, build a signed IPA, verify it actually
-# ships the content script at the right bundle IDs and version, and upload to
+# ships the content scripts at the right bundle IDs and version, and upload to
 # TestFlight. `build` does everything except the upload (local sanity check).
 # `certificates` seeds/syncs signing from a Mac.
 #
@@ -38,8 +38,8 @@ EXTENSION_DIR = File.join(REPO_ROOT, "extension")
 BUILD_DIR     = File.join(REPO_ROOT, "build")
 GEN_DIR       = File.join(BUILD_DIR, "gen")
 
-# The one file that is the actual product — verified present in the shipped IPA.
-CONTENT_SCRIPT = "block-reddit-nag.js"
+# The files that are the actual product — verified present in the shipped IPA.
+CONTENT_SCRIPTS = ["block-reddit-nag.js", "block-x-nag.js"]
 
 platform :ios do
   desc "Sync signing material (read-only on CI) without building anything"
@@ -283,7 +283,7 @@ end
 #      Connect rejects the upload as a duplicate build
 #   4. both carry the user-visible display name — the space-free APP_NAME drives
 #      the build paths, so this is the only thing proving the real name shipped
-#   5. the content script and manifest are actually inside the appex — a signed,
+#   5. the content scripts and manifest are actually inside the appex — a signed,
 #      correctly-versioned IPA containing no extension code would otherwise sail
 #      through to TestFlight and simply do nothing on device
 def verify_ipa(ipa, marketing_version, build_number)
@@ -340,11 +340,11 @@ def verify_ipa(ipa, marketing_version, build_number)
     check_display_name "$EXT"
 
     # The product itself must be in the appex's web resources.
-    for f in "#{CONTENT_SCRIPT}" manifest.json; do
+    for f in #{CONTENT_SCRIPTS.map { |s| "\"#{s}\"" }.join(" ")} manifest.json; do
       find "$EXT" -name "$f" | grep -q . || { echo "::error::$f is not present in $(basename "$EXT") — the IPA would install an extension with no content script."; exit 1; }
     done
 
-    echo "OK: IPA ships '#{APP_DISPLAY_NAME}' (#{APP_ID} + #{EXT_ID}) at #{marketing_version} (#{build_number}) with the content script"
+    echo "OK: IPA ships '#{APP_DISPLAY_NAME}' (#{APP_ID} + #{EXT_ID}) at #{marketing_version} (#{build_number}) with the content scripts"
   BASH
 end
 

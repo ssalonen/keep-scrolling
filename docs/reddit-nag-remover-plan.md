@@ -10,18 +10,20 @@ the body scroll-lock, and self-heals against rotating IDs / re-injection.
 ```
 extension/
   manifest.json
-  block-reddit-nag.js      <- the content script (the whole product)
+  block-reddit-nag.js      <- Reddit content script
+  block-x-nag.js           <- X/Twitter content script (independent, see x-nag-remover-plan.md)
   icon-48.png / icon-96.png / icon-128.png
 .github/workflows/
   ci.yml                   <- lint + invariant tests + auto-release on green main
   release.yml              <- sign with match + upload to TestFlight + GitHub Release
   bump-version.yml         <- manual workflow_dispatch version bump
-  security.yml             <- CodeQL on the content script
+  security.yml             <- CodeQL on the content scripts
 fastlane/
   Fastfile                 <- lanes: certificates, build, beta
   Appfile / Matchfile      <- bundle IDs, team, match git storage
 Gemfile                    <- pins fastlane
 docs/reddit-nag-remover-plan.md
+docs/x-nag-remover-plan.md <- X/Twitter diagnosis and caveats
 docs/FASTLANE-MIGRATION.md <- signing/release pipeline + one-time manual setup
 icon.png                   <- 512px icon
 test/extension.test.js     <- node:test invariant guards (no deps)

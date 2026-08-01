@@ -139,7 +139,8 @@ against the inputs that produced it:
    (the case-mismatch bug, now caught at build time instead of on device)
 3. both carry the tag's version **and** this run's build number — otherwise ASC
    rejects the upload, or worse, accepts a mislabelled one
-4. `block-reddit-nag.js` and `manifest.json` are actually inside the appex
+4. `block-reddit-nag.js`, `block-x-nag.js`, and `manifest.json` are actually
+   inside the appex
 
 (4) is the one that matters most: a correctly signed, correctly versioned IPA
 containing **no extension code** would sail through to TestFlight and simply do
