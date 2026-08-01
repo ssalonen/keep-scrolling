@@ -103,6 +103,11 @@ share code with the Reddit script (see `docs/x-nag-remover-plan.md` for why).
   surrounding Tailwind utility classes (cosmetic, retouch-prone) and NOT by
   bare `<aside>` or `role="region"` — the page also has an unrelated,
   legally-required cookie-consent banner that must never be touched.
+- IMPORTANT: only remove the whole `<aside>` when `getComputedStyle(aside).
+  position === 'fixed'` (the banner's actual shape). An on-device test found
+  that blindly removing any `<aside>` ancestor took out an in-flow reply-list
+  region along with it, permanently stalling reply pagination — anchor-only
+  removal is the safe fallback when the ancestor isn't the floating banner.
 - Unlike Reddit, `releaseScroll()` here only runs when the banner was found
   this pass. X's inline `overflow:hidden` idiom is likely reused by
   unrelated legitimate modals (compose box, image viewer), so releasing it

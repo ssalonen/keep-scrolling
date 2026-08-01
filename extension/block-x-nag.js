@@ -44,7 +44,13 @@
     let anchors;
     try { anchors = document.querySelectorAll(APP_BANNER_LINK_SELECTOR); } catch { anchors = []; }
     for (const a of anchors) {
-      const host = a.closest('aside') || a;
+      // Only take the whole <aside> ancestor when it's actually the floating
+      // banner (position: fixed, matching the observed markup) — an in-flow
+      // <aside> could be something else entirely (e.g. a reply-list region
+      // whose pagination sentinel we'd delete along with it), so fall back to
+      // removing just the anchor rather than guessing.
+      const aside = a.closest('aside');
+      const host = aside && getComputedStyle(aside).position === 'fixed' ? aside : a;
       host.remove();
       hit = true;
     }

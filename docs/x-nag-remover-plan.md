@@ -95,6 +95,17 @@ has an explicit regression guard for this.
   worth an on-device check that no *other* `<aside>`-wrapped variant leaves
   behind an empty fixed-position gradient strip when only the anchor inside
   it gets removed.
+- **On-device finding: whole-`<aside>` removal can eat unrelated content.**
+  First on-device test showed replies past the first one stuck as permanent
+  "Loading post" skeletons after the banner was removed. Working theory: the
+  static-snapshot assumption that the marker link's `<aside>` ancestor is
+  *always* the isolated floating banner doesn't hold once real infinite-scroll
+  reply-loading is in play — an in-flow `<aside>` could be a reply-list region
+  whose pagination sentinel gets deleted along with it. Fixed by only removing
+  the whole `<aside>` when `getComputedStyle(aside).position === 'fixed'`
+  (matching the documented banner shape: `class="fixed bottom-0 isolate z-40
+  ..."`), falling back to anchor-only removal otherwise. Needs to be
+  re-verified on-device.
 - **Gated `releaseScroll()`**: if on-device testing shows the page stays
   scroll-locked after the banner is removed (e.g. the banner and the lock
   land in separate mutation batches), loosen this to an unconditional
