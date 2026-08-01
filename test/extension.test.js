@@ -85,6 +85,14 @@ test('X script matches the app-upsell banner by its purpose-built href/download 
   }
 });
 
+test('X script only removes the whole <aside> when it is actually the fixed floating banner', () => {
+  assert.ok(
+    scriptX.includes('getComputedStyle(aside).position === \'fixed\''),
+    'must gate whole-<aside> removal on position:fixed — an in-flow <aside> could be unrelated ' +
+      'content (e.g. a reply-list region) whose removal would break the page beyond the banner',
+  );
+});
+
 test('X script never matches on <aside> or role=region alone (must not catch cookie-consent banner)', () => {
   assert.ok(
     !/document\.querySelectorAll\(\s*['"]aside['"]\s*\)/.test(scriptX),
