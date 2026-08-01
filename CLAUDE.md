@@ -47,8 +47,10 @@ references: @docs/reddit-nag-remover-plan.md
 - **Install**: via TestFlight. Then on device: Settings ▸ Apps ▸ Safari ▸
   Extensions ▸ enable, set reddit.com to Allow Always.
 - **No Xcode project is committed** — it is generated into `build/gen` on every
-  run by `generate_project` in the Fastfile, which also forces the bundle IDs and
-  repoints the `Info.plist` version keys at the build settings. Patching it is
+  run by `generate_project` in the Fastfile, which also forces the bundle IDs,
+  repoints the `Info.plist` version keys at the build settings, and declares
+  export compliance (`ITSAppUsesNonExemptEncryption`) so TestFlight builds are
+  not parked behind a manual question. Patching it is
   safe *because* it is a throwaway artifact; never point the converter at a
   tracked path.
 - **Local**: `bundle exec fastlane build` runs the whole pipeline minus the

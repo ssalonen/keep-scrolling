@@ -82,7 +82,7 @@ commits **no project at all** — Apple's `safari-web-extension-converter`
 generates the container app + extension appex from `extension/` at build time.
 
 That moves the generate-and-patch step into the Fastfile (`generate_project`), and
-it has to fix three things the converter gets wrong or leaves unset:
+it has to fix four things the converter gets wrong or leaves unset:
 
 1. **Bundle identifiers.** The converter builds the container app's
    `PRODUCT_BUNDLE_IDENTIFIER` from `--bundle-identifier`'s **prefix** plus
@@ -120,6 +120,20 @@ it has to fix three things the converter gets wrong or leaves unset:
    rewrites those keys to `$(MARKETING_VERSION)` / `$(CURRENT_PROJECT_VERSION)`
    so the tag version and the CI run number actually reach the binary.
 
+4. **Export compliance.** The converter sets no `ITSAppUsesNonExemptEncryption`,
+   so every uploaded build lands in App Store Connect as **"Missing
+   Compliance"** and cannot reach testers until someone answers the encryption
+   question by hand in the console — silently, *after* a green release. The
+   Fastfile declares it as `NO`, which is the accurate answer: the content
+   script only manipulates the DOM, and the app makes no network calls of its
+   own. (If that ever changes — say the app starts talking to a server over
+   anything but standard HTTPS — this declaration has to be revisited; it is a
+   statement made to Apple, not a build flag.)
+
+   Note this must be set as the `INFOPLIST_KEY_*` **build setting**, not just
+   written into the `Info.plist` file, for the same reason as the display name
+   below.
+
 Patching a generated project is safe **because it is a build artifact** under
 `build/gen`, regenerated from scratch every run. This is the opposite of the bug
 that broke every-byte-counts, where XcodeGen was writing over *tracked*
@@ -139,7 +153,10 @@ against the inputs that produced it:
    (the case-mismatch bug, now caught at build time instead of on device)
 3. both carry the tag's version **and** this run's build number — otherwise ASC
    rejects the upload, or worse, accepts a mislabelled one
-4. `block-reddit-nag.js` and `manifest.json` are actually inside the appex
+4. the app declares `ITSAppUsesNonExemptEncryption` — a missing value fails
+   *open*: the upload succeeds and the build then sits in "Missing Compliance"
+   until a human notices
+5. `block-reddit-nag.js` and `manifest.json` are actually inside the appex
 
 (4) is the one that matters most: a correctly signed, correctly versioned IPA
 containing **no extension code** would sail through to TestFlight and simply do
