@@ -34,14 +34,3 @@ jobs:
         uses: github/codeql-action/analyze@v3
         with:
           category: "/language:javascript"
-
-      # TEMPORARY DIAGNOSTIC — remove before merge. The code-scanning gate
-      # reports alert counts but not locations, and nothing else here can read
-      # the annotations, so print the SARIF results directly.
-      - name: Print CodeQL findings
-        if: always()
-        run: |
-          f="$GITHUB_WORKSPACE/../results/javascript.sarif"
-          [ -f "$f" ] || { echo "no sarif at $f"; find "$GITHUB_WORKSPACE/.." -name '*.sarif' 2>/dev/null; exit 0; }
-          jq -r '.runs[].results[]
-            | "RULE: \(.ruleId)\nAT:   \(.locations[0].physicalLocation.artifactLocation.uri):\(.locations[0].physicalLocation.region.startLine)\nMSG:  \(.message.text)\n"' "$f"

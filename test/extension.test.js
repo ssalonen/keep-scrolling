@@ -16,7 +16,7 @@ const appHtml = readFileSync(join(root, 'app', 'Main.html'), 'utf8');
 const fastfile = readFileSync(join(root, 'fastlane', 'Fastfile'), 'utf8');
 // The page is one self-contained file; pull its inline script out for checks
 // that need the JS on its own.
-const appScript = (appHtml.match(/<script>([\s\S]*?)<\/script>/) || [, ''])[1];
+const appScript = (appHtml.match(/<script>([\s\S]*?)<\/script>/i) || [, ''])[1];
 
 // Count literal occurrences without building a RegExp out of file contents —
 // dynamic patterns from file data are a code-scanning finding (js/regex-injection),
@@ -195,9 +195,9 @@ test('app UI is one self-contained file with no sibling assets', () => {
   for (const [, ref] of appHtml.matchAll(/(?:src|href)="([^"]+)"/g)) {
     assert.ok(ref.startsWith('data:'), `app UI must inline its assets, got a reference to: ${ref}`);
   }
-  assert.ok(!/<link\b/.test(appHtml), 'no external stylesheet — the CSS is inline');
-  assert.ok(!/<script[^>]+\bsrc=/.test(appHtml), 'no external script — the JS is inline');
-  assert.ok(/<style>/.test(appHtml) && /<script>/.test(appHtml), 'CSS and JS must be inline in the page');
+  assert.ok(!/<link\b/i.test(appHtml), 'no external stylesheet — the CSS is inline');
+  assert.ok(!/<script[^>]+\bsrc=/i.test(appHtml), 'no external script — the JS is inline');
+  assert.ok(/<style>/i.test(appHtml) && /<script>/i.test(appHtml), 'CSS and JS must be inline in the page');
 });
 
 test('app UI overview names every site the extension actually runs on', () => {
