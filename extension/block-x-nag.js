@@ -22,12 +22,23 @@
 //    runs when the banner itself was found this pass, so we don't fight
 //    unrelated X UI (compose box, image viewer, etc.) that may reuse the
 //    same inline-style lock idiom.
+//  - Separately, logged-out engagement controls (Reply/Repost/Like/Bookmark,
+//    and the whole-row tap target on a reply) are wired to
+//    "https://m.x.com/...?launch_app_store=true&ct=engagement_*" — tapping
+//    ANY of them, not just the banner, forces the app-install bounce. These
+//    links have no `download` attribute, so they're a separate mechanism
+//    from the banner and need their own handling: strip just the
+//    launch_app_store=true param (leaving the rest of the URL, e.g.
+//    ct=engagement_reply, intact) so the tap navigates normally instead of
+//    being redirected to the store.
 
 (() => {
   'use strict';
 
   const APP_BANNER_LINK_SELECTOR = 'a[download][href*="launch_app_store=true"]';
   const APP_BANNER_CSS_SELECTOR = `aside:has(${APP_BANNER_LINK_SELECTOR})`;
+  const APP_STORE_HREF_SELECTOR =
+    '[href*="launch_app_store=true"], [data-href*="launch_app_store=true"]';
 
   // --- Release the page scroll (inline overflow/padding only) ----------------
   function releaseScroll() {
@@ -61,6 +72,29 @@
     return hit;
   }
 
+  // --- Strip the app-store-bounce param from engagement links/rows -----------
+  function stripAppStoreParam(url) {
+    return url
+      .replace(/([?&])launch_app_store=true&?/, '$1')
+      .replace(/[?&]$/, '');
+  }
+
+  function defuseAppStoreLinks() {
+    let hit = false;
+    let els;
+    try { els = document.querySelectorAll(APP_STORE_HREF_SELECTOR); } catch { els = []; }
+    for (const el of els) {
+      for (const attr of ['href', 'data-href']) {
+        const val = el.getAttribute(attr);
+        if (val && val.includes('launch_app_store=true')) {
+          el.setAttribute(attr, stripAppStoreParam(val));
+          hit = true;
+        }
+      }
+    }
+    return hit;
+  }
+
   // --- Inject a race-free CSS backstop ----------------------------------------
   function injectStyle() {
     if (document.getElementById('xnr-style')) return;
@@ -78,6 +112,7 @@
     queued = false;
     injectStyle();
     killNags();
+    defuseAppStoreLinks();
   }
   function schedule() {
     if (queued) return;

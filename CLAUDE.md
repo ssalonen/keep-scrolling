@@ -120,6 +120,16 @@ share code with the Reddit script (see `docs/x-nag-remover-plan.md` for why).
   snapshot, confirm the anchor still has `download` + `launch_app_store=true`
   (or find its new marker), and update `APP_BANNER_LINK_SELECTOR` — same
   one-line-of-maintenance goal as Reddit's `NAG_SELECTORS`.
+- IMPORTANT: the app-install nag isn't only the `<aside>` banner. Every
+  logged-out engagement control (Reply/Repost/Like/Bookmark, and a reply
+  row's whole-row tap target) carries `launch_app_store=true` in its
+  `href`/`data-href` — X's own signal to bounce that tap to the App Store,
+  with no `download` attribute, so `killNags()` never touches it.
+  `defuseAppStoreLinks()` strips just that param (via `stripAppStoreParam()`)
+  from any matching `href`/`data-href`, leaving the rest of the URL (e.g.
+  `ct=engagement_reply`) intact, and runs on every pass alongside
+  `killNags()`. **Unverified on-device** whether removing the param actually
+  suppresses the bounce — see `docs/x-nag-remover-plan.md`.
 
 ## Conventions
 - Vanilla JS only, no dependencies, no build step for the script itself.

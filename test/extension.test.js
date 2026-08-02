@@ -104,6 +104,35 @@ test('X script never matches on <aside> or role=region alone (must not catch coo
   );
 });
 
+test('stripAppStoreParam removes only the launch_app_store=true flag, preserving the rest of the query string', () => {
+  const match = scriptX.match(/function stripAppStoreParam\(url\) \{[\s\S]*?\n  \}/);
+  assert.ok(match, 'stripAppStoreParam function not found in source');
+  const stripAppStoreParam = new Function(`${match[0]}; return stripAppStoreParam;`)();
+  assert.equal(
+    stripAppStoreParam('https://m.x.com/i/status/1?launch_app_store=true&ct=engagement_reply'),
+    'https://m.x.com/i/status/1?ct=engagement_reply',
+  );
+  assert.equal(
+    stripAppStoreParam('https://m.x.com/i/status/1?launch_app_store=true'),
+    'https://m.x.com/i/status/1',
+  );
+  assert.equal(
+    stripAppStoreParam('https://m.x.com/i/status/1?ct=engagement_reply&launch_app_store=true'),
+    'https://m.x.com/i/status/1?ct=engagement_reply',
+  );
+});
+
+test('X script defuses launch_app_store=true on both href and data-href (engagement buttons and whole-row tap targets)', () => {
+  assert.ok(scriptX.includes('function defuseAppStoreLinks'), 'defuseAppStoreLinks() must exist');
+  for (const sig of ['[href*="launch_app_store=true"]', '[data-href*="launch_app_store=true"]']) {
+    assert.ok(scriptX.includes(sig), `missing selector: ${sig}`);
+  }
+  assert.ok(
+    /run\(\)\s*\{[\s\S]*?defuseAppStoreLinks\(\);/.test(scriptX),
+    'defuseAppStoreLinks() must run on every pass alongside killNags()',
+  );
+});
+
 test('X script releases scroll only when the banner is found', () => {
   assert.ok(/function\s+releaseScroll/.test(scriptX), 'releaseScroll() must exist');
   assert.ok(/function\s+killNags/.test(scriptX), 'killNags() must exist');
