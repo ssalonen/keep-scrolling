@@ -103,6 +103,32 @@ test('X script only removes the whole <aside> when it is actually the fixed floa
   );
 });
 
+test('X script removes the blocking "See this post in the app" modal by its data-interaction marker', () => {
+  assert.ok(
+    scriptX.includes('[data-interaction^="app-store-obstruction"]'),
+    'must match X\'s own semantic marker for the blocking app-install modal',
+  );
+  // The modal covers the viewport with `touch-none`, so hiding it IS the scroll
+  // fix — but it must also be in the CSS backstop, which for this one needs no
+  // :has() and therefore works below iOS 16.4 too.
+  assert.ok(
+    /style\.textContent =[\s\S]*?\$\{APP_OBSTRUCTION_SELECTOR\}\s*\{\s*display: none/.test(scriptX),
+    'the injected CSS must hide the blocking modal as well',
+  );
+});
+
+test('X script never matches modals by role/aria alone (must not catch legitimate X dialogs)', () => {
+  // Comments discuss these selectors on purpose; only real code counts.
+  const codeX = scriptX.replace(/^\s*\/\/.*$/gm, '');
+  for (const overbroad of ['role="dialog"', 'aria-modal', 'touch-none']) {
+    assert.ok(
+      !codeX.includes(overbroad),
+      `must not select on ${overbroad} — X uses the same shape for the share menu, ` +
+        'the verified-badge popover and other legitimate dialogs',
+    );
+  }
+});
+
 test('X script never matches on <aside> or role=region alone (must not catch cookie-consent banner)', () => {
   assert.ok(
     !/document\.querySelectorAll\(\s*['"]aside['"]\s*\)/.test(scriptX),
@@ -154,6 +180,19 @@ test('X script releases scroll only when the banner is found', () => {
 
 test('X script stays reactive via MutationObserver', () => {
   assert.ok(scriptX.includes('MutationObserver'));
+});
+
+test('injectStyle() never throws when there is no document element yet', () => {
+  // At document_start there may be nothing to append to. A throw there escapes
+  // the first run() call and aborts the script BEFORE the MutationObserver is
+  // installed, so the page silently gets no protection at all.
+  for (const [name, src] of [['reddit', script], ['x', scriptX]]) {
+    const injectStyle = new Function(
+      'document',
+      `${src.match(/function injectStyle\(\) \{[\s\S]*?\n  \}/)[0]}; return injectStyle;`,
+    )({ head: null, documentElement: null, getElementById: () => null });
+    assert.doesNotThrow(injectStyle, `${name} script: injectStyle() must bail out, not throw`);
+  }
 });
 
 test('manifest icons exist on disk', () => {
@@ -236,6 +275,24 @@ test('app UI matches what the Fastfile copies and verify_ipa greps for', () => {
 
   const marker = fastfile.match(/APP_UI_MARKER = '([^']+)'/)[1];
   assert.ok(appHtml.includes(marker), `verify_ipa greps the shipped Main.html for ${marker}`);
+});
+
+test('app UI scrolls its own content, and the Fastfile re-enables the web view scroll', () => {
+  // Two independent layers, because the page is taller than a phone screen and
+  // the converter's host template disables the web view's scroll view on iOS.
+  assert.ok(
+    /main\s*\{[^}]*overflow-y:\s*auto/.test(appHtml),
+    'main must be an overflow:auto scroll container — it scrolls inside WebKit even when the ' +
+      "host disabled the web view's own scroll view",
+  );
+  assert.ok(
+    fastfile.includes('isScrollEnabled = false') && fastfile.includes('isScrollEnabled = true'),
+    'generate_project must flip the template\'s webView.scrollView.isScrollEnabled back on',
+  );
+  assert.ok(
+    /def enable_app_scrolling/.test(fastfile) && /enable_app_scrolling\s*$/m.test(fastfile),
+    'enable_app_scrolling must be defined and actually called from generate_project',
+  );
 });
 
 test('app UI keeps the enable instructions, the one thing a user must act on', () => {

@@ -96,10 +96,21 @@ host; the live variant is `-seo`, so its fog and scroll-lock pass through.
 ## X/Twitter nag (`extension/block-x-nag.js`)
 Removes X's logged-out "Open X App" bottom banner (an `<aside>` containing
 `a[download][href*="launch_app_store=true"]`, component internally named
-`logged-out-open-app-banner`) and releases the body's inline
-`overflow:hidden` scroll lock. This is an independent content script scoped
-to `*://*.x.com/*` and `*://*.twitter.com/*` — it deliberately does **not**
-share code with the Reddit script (see `docs/x-nag-remover-plan.md` for why).
+`logged-out-open-app-banner`), the blocking "See this post in the app" modal
+(`[data-interaction^="app-store-obstruction"]`), and releases the body's
+inline `overflow:hidden` scroll lock. This is an independent content script
+scoped to `*://*.x.com/*` and `*://*.twitter.com/*` — it deliberately does
+**not** share code with the Reddit script (see `docs/x-nag-remover-plan.md`
+for why).
+
+- IMPORTANT: the **blocking** variant is a full-screen
+  `div[role="dialog"][aria-modal]` with `fixed inset-0 … touch-none` that
+  swallows every touch — the banner logic never saw it, which is why the nag
+  survived through v0.5.x. Match it only by `data-interaction` (X's own
+  semantic name for it, prefix-matched so `-backdrop`/`-panel`/a renamed root
+  are covered), NEVER by `role="dialog"`, `aria-modal` or `touch-none` — X
+  uses that same shape for the share menu and other legitimate dialogs.
+  `test/extension.test.js` guards this.
 
 - Match by the `download` + `launch_app_store=true` marker on the anchor,
   then `.closest('aside')` to remove the whole banner — NOT by the
@@ -111,10 +122,17 @@ share code with the Reddit script (see `docs/x-nag-remover-plan.md` for why).
   that blindly removing any `<aside>` ancestor took out an in-flow reply-list
   region along with it, permanently stalling reply pagination — anchor-only
   removal is the safe fallback when the ancestor isn't the floating banner.
-- Unlike Reddit, `releaseScroll()` here only runs when the banner was found
-  this pass. X's inline `overflow:hidden` idiom is likely reused by
-  unrelated legitimate modals (compose box, image viewer), so releasing it
-  unconditionally risks fighting those.
+- Unlike Reddit, `releaseScroll()` here only runs when a nag (banner or
+  blocking modal) was found this pass. X's inline `overflow:hidden` idiom is
+  likely reused by unrelated legitimate modals (compose box, image viewer),
+  so releasing it unconditionally risks fighting those. It also clears an
+  inline `pointer-events:none` — the modal's lock disables the page behind it
+  that way — but only that exact inline value.
+- IMPORTANT: `injectStyle()` must never throw. At `document_start` there can
+  be no `document.documentElement` to append to, and an exception in the
+  first `run()` aborts the script *before* the `MutationObserver` is
+  installed — silently disabling the extension for the whole page load. Both
+  scripts bail out and retry on a later pass instead.
 - The injected CSS backstop uses `:has()` (iOS/Safari 16.4+); the JS
   `killNags()` removal path via `MutationObserver` doesn't depend on it and
   still works on older iOS, just without the early-hide race protection.
@@ -147,6 +165,14 @@ insets, **zero network requests**.
   `verify_ipa` then asserts the shipped `.app` really contains our page at the
   right version — a converter template move would otherwise silently re-ship
   Apple's placeholder.
+- IMPORTANT: the page must scroll on its own. Apple's app template disables
+  the web view's scroll view on iOS (`webView.scrollView.isScrollEnabled =
+  false`) because its placeholder page is one line, which left everything
+  below the fold unreachable in our overview screen. Two layers fix it and
+  both are guarded by `test/extension.test.js`: `enable_app_scrolling`
+  (Fastfile) flips that line in the generated Swift, and `main` is an
+  `overflow-y:auto` container so the page scrolls inside WebKit even if a
+  future template moves the line.
 - IMPORTANT: overwrite the template's `Main.html` **in place**; do not add
   files. The generated project references exactly that path, so anything new
   would be copied but never bundled unless registered with `xcodeproj`.

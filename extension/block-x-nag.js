@@ -22,6 +22,14 @@
 //    runs when the banner itself was found this pass, so we don't fight
 //    unrelated X UI (compose box, image viewer, etc.) that may reuse the
 //    same inline-style lock idiom.
+//  - X also ships a *blocking* variant: a full-screen modal titled "See this
+//    post in the app" (role="dialog" aria-modal, `fixed inset-0 touch-none`)
+//    that covers the page and swallows touches, so the page cannot be scrolled
+//    even though the <aside> banner is gone. It carries no launch_app_store
+//    link at all — its marker is data-interaction="app-store-obstruction" on
+//    the dialog root (with -backdrop / -panel children). That attribute is
+//    X's own semantic name for the thing, so it is matched like the banner's
+//    markers: by purpose, not by the Tailwind classes around it.
 //  - Separately, logged-out engagement controls (Reply/Repost/Like/Bookmark,
 //    and the whole-row tap target on a reply) are wired to
 //    "https://m.x.com/...?launch_app_store=true&ct=engagement_*" — tapping
@@ -39,12 +47,23 @@
   const APP_BANNER_CSS_SELECTOR = `aside:has(${APP_BANNER_LINK_SELECTOR})`;
   const APP_STORE_HREF_SELECTOR =
     '[href*="launch_app_store=true"], [data-href*="launch_app_store=true"]';
+  // Prefix-matched so a renamed root (…-obstruction-dialog) is still caught,
+  // and so the -backdrop / -panel children are covered by the CSS backstop
+  // even if the root itself is ever restructured. Everything X names
+  // "app-store-obstruction" IS the app-install nag, so this cannot over-match
+  // the way a bare [role="dialog"] would (that would also catch the verified
+  // badge popover, the share menu, etc.).
+  const APP_OBSTRUCTION_SELECTOR = '[data-interaction^="app-store-obstruction"]';
 
-  // --- Release the page scroll (inline overflow/padding only) ----------------
+  // --- Release the page scroll (inline overflow/pointer-events only) ---------
   function releaseScroll() {
     for (const el of [document.documentElement, document.body]) {
       if (!el || !el.style) continue;
       if (el.style.overflow === 'hidden') el.style.overflow = '';
+      // The modal's scroll lock also disables interaction with everything
+      // behind it via an inline pointer-events:none — clear only that exact
+      // inline value, never a stylesheet-driven one.
+      if (el.style.pointerEvents === 'none') el.style.pointerEvents = '';
       el.style.removeProperty('padding-right');
     }
   }
@@ -65,9 +84,21 @@
       host.remove();
       hit = true;
     }
-    // Only release scroll when we actually found the banner: X reuses plain
-    // inline overflow:hidden for unrelated modals, and we don't want to fight
-    // those.
+
+    // The blocking "See this post in the app" modal. Removing the dialog root
+    // takes its backdrop and panel with it; the children are skipped by the
+    // isConnected check rather than removed twice.
+    let obstructions;
+    try { obstructions = document.querySelectorAll(APP_OBSTRUCTION_SELECTOR); } catch { obstructions = []; }
+    for (const el of obstructions) {
+      if (!el.isConnected) continue;
+      el.remove();
+      hit = true;
+    }
+
+    // Only release scroll when we actually found a nag (banner or blocking
+    // modal): X reuses plain inline overflow:hidden for unrelated modals, and
+    // we don't want to fight those.
     if (hit) releaseScroll();
     return hit;
   }
@@ -97,13 +128,25 @@
 
   // --- Inject a race-free CSS backstop ----------------------------------------
   function injectStyle() {
-    if (document.getElementById('xnr-style')) return;
+    // At document_start there may be no document element yet to append to.
+    // Bail out instead of throwing: an exception here would propagate out of
+    // the first run() call and abort the whole script *before* the observer
+    // below is installed, leaving the page unprotected for good. Every later
+    // pass calls this again, so the style still lands as soon as there is
+    // somewhere to put it.
+    const root = document.head || document.documentElement;
+    if (!root || document.getElementById('xnr-style')) return;
     const style = document.createElement('style');
     style.id = 'xnr-style';
     style.textContent =
       `${APP_BANNER_CSS_SELECTOR} { display: none !important; }\n` +
-      `body:has(${APP_BANNER_CSS_SELECTOR}) { overflow: auto !important; }`;
-    (document.head || document.documentElement).appendChild(style);
+      `body:has(${APP_BANNER_CSS_SELECTOR}) { overflow: auto !important; }\n` +
+      // Plain attribute match — no :has() — so the blocking modal is hidden
+      // (and stops swallowing touches) even on iOS below 16.4, before the
+      // observer gets a chance to remove it.
+      `${APP_OBSTRUCTION_SELECTOR} { display: none !important; }\n` +
+      `body:has(${APP_OBSTRUCTION_SELECTOR}) { overflow: auto !important; }`;
+    root.appendChild(style);
   }
 
   // --- Debounced runner driven by the observer --------------------------------

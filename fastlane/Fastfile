@@ -181,6 +181,9 @@ def generate_project(marketing_version, build_number)
   #    early rather than after signing.
   apply_app_ui(marketing_version, build_number)
 
+  # 0b. Re-enable the container app's scrolling (see enable_app_scrolling).
+  enable_app_scrolling
+
   proj = Xcodeproj::Project.open(project_path)
   app  = find_target(proj, "com.apple.product-type.application", "container app")
   ext  = find_target(proj, "com.apple.product-type.app-extension", "Safari extension appex")
@@ -286,6 +289,41 @@ def apply_app_ui(marketing_version, build_number)
   File.write(main_html, contents.gsub(APP_UI_VERSION_TOKEN, "Version #{marketing_version} (#{build_number})"))
 
   UI.message("Applied container-app UI from app/: #{dests.values.map { |p| p.sub("#{GEN_DIR}/", '') }.join(', ')}")
+end
+
+# Re-enable scrolling in the container app's web view.
+#
+# Apple's app template disables the web view's scroll view on iOS
+# (`webView.scrollView.isScrollEnabled = false`) because the page it ships is a
+# single line of placeholder text. Our page is a full overview screen, so with
+# that line intact everything below the fold is simply unreachable — the app
+# looks truncated and dead. Flip it to true instead of deleting the line, so
+# the generated source still reads as a deliberate setting.
+#
+# Not fatal when the line is absent: that means the template no longer disables
+# scrolling, which is the state we want anyway. app/Main.html additionally
+# scrolls its own content in an overflow:auto container, so the page stays
+# usable even if this patch silently stops matching.
+def enable_app_scrolling
+  sources = Dir.glob(File.join(GEN_DIR, "**", "*.swift"))
+  UI.user_error!("safari-web-extension-converter produced no Swift sources under #{GEN_DIR}") if sources.empty?
+
+  patched = sources.select do |path|
+    contents = File.read(path)
+    next false unless contents.include?("isScrollEnabled = false")
+
+    File.write(path, contents.gsub("isScrollEnabled = false", "isScrollEnabled = true"))
+    true
+  end
+
+  if patched.empty?
+    UI.important(
+      "No `isScrollEnabled = false` in the generated app sources — the template no longer disables " \
+      "web view scrolling, or renamed it. Nothing to patch; app/Main.html scrolls its own content regardless."
+    )
+  else
+    UI.message("Re-enabled container-app scrolling in: #{patched.map { |p| p.sub("#{GEN_DIR}/", '') }.join(', ')}")
+  end
 end
 
 def find_target(proj, product_type, description)
