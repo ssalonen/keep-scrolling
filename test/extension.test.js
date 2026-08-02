@@ -18,6 +18,11 @@ const fastfile = readFileSync(join(root, 'fastlane', 'Fastfile'), 'utf8');
 // that need the JS on its own.
 const appScript = (appHtml.match(/<script>([\s\S]*?)<\/script>/) || [, ''])[1];
 
+// Count literal occurrences without building a RegExp out of file contents —
+// dynamic patterns from file data are a code-scanning finding (js/regex-injection),
+// and plain string counting is what these checks actually need.
+const countOccurrences = (haystack, needle) => haystack.split(needle).length - 1;
+
 test('content script is syntactically valid', () => {
   // Throws on a syntax error; `new Function` never executes the body.
   assert.doesNotThrow(() => new Function(script));
@@ -215,7 +220,7 @@ test('app UI matches what the Fastfile copies and verify_ipa greps for', () => {
 
   const token = fastfile.match(/APP_UI_VERSION_TOKEN = "([^"]+)"/)[1];
   assert.equal(
-    (appHtml.match(new RegExp(token, 'g')) || []).length,
+    countOccurrences(appHtml, token),
     1,
     `${token} must appear EXACTLY once (the footer). apply_app_ui gsubs every occurrence, so a ` +
       'second one — e.g. inside the inline script — gets rewritten too and silently changes behaviour',
@@ -238,9 +243,6 @@ test('app UI keeps the enable instructions, the one thing a user must act on', (
   assert.ok(/Allow Always/.test(appHtml), 'must mention Allow Always — otherwise Safari prompts every visit');
   for (const cls of ['platform-ios-only', 'platform-mac-only']) {
     // Once in the markup, once in the inline CSS that hides/shows it.
-    assert.ok(
-      (appHtml.match(new RegExp(cls, 'g')) || []).length >= 2,
-      `missing platform switching for ${cls}`,
-    );
+    assert.ok(countOccurrences(appHtml, cls) >= 2, `missing platform switching for ${cls}`);
   }
 });
