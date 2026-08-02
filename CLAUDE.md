@@ -143,14 +143,29 @@ for why).
   one-line-of-maintenance goal as Reddit's `NAG_SELECTORS`.
 - IMPORTANT: the app-install nag isn't only the `<aside>` banner. Every
   logged-out engagement control (Reply/Repost/Like/Bookmark, and a reply
-  row's whole-row tap target) carries `launch_app_store=true` in its
-  `href`/`data-href` — X's own signal to bounce that tap to the App Store,
-  with no `download` attribute, so `killNags()` never touches it.
-  `defuseAppStoreLinks()` strips just that param (via `stripAppStoreParam()`)
-  from any matching `href`/`data-href`, leaving the rest of the URL (e.g.
-  `ct=engagement_reply`) intact, and runs on every pass alongside
-  `killNags()`. **Unverified on-device** whether removing the param actually
-  suppresses the bounce — see `docs/x-nag-remover-plan.md`.
+  row's whole-row tap target) points at
+  `https://m.x.com/…?launch_app_store=true&ct=engagement_*` in its
+  `href`/`data-href` — tapping any of them bounces to the App Store. They have
+  no `download` attribute, so `killNags()` never touches them.
+- IMPORTANT: **stripping `launch_app_store=true` is not the fix.** An
+  on-device snapshot showed every link already stripped by this script and the
+  tap still landing on the App Store: the bounce is the **`m.x.com` host
+  itself**. `defuseAppStoreUrl()` therefore does both — `stripAppStoreParam()`
+  for the flag and `demobilizeHost()` to swap `m.`/`mobile.` for the apex host
+  (`m.x.com/<path>` and `x.com/<path>` are the same post, so the destination is
+  preserved along with `ct=engagement_*`). Do not regress this back to a
+  param-only strip.
+- The fix has two layers and needs both: `defuseAppStoreLinks()` rewrites the
+  attributes on every pass, and `onClickCapture` (capture-phase `click` on
+  `document`) cancels the tap and navigates to the rewritten URL itself. The
+  handler exists because attribute rewriting alone has two holes — a tap can
+  beat the rAF-debounced pass on a freshly-rendered reply row, and X may
+  navigate from its own copy of the URL without ever reading the attribute
+  back (that copy is unreachable from a content script).
+- IMPORTANT: `onClickCapture` must only ever act on a link `defuseAppStoreUrl()`
+  would change, or one already in the `defusedEls` WeakSet. Anything else must
+  return untouched — a `preventDefault()` on an ordinary X link would break
+  navigation across the whole site. `test/extension.test.js` guards this.
 
 ## Container app UI (`app/`)
 The container app (the home-screen icon) does nothing functional — the product

@@ -35,18 +35,35 @@
 //    "https://m.x.com/...?launch_app_store=true&ct=engagement_*" — tapping
 //    ANY of them, not just the banner, forces the app-install bounce. These
 //    links have no `download` attribute, so they're a separate mechanism
-//    from the banner and need their own handling: strip just the
-//    launch_app_store=true param (leaving the rest of the URL, e.g.
-//    ct=engagement_reply, intact) so the tap navigates normally instead of
-//    being redirected to the store.
+//    from the banner and need their own handling.
+//  - IMPORTANT: stripping launch_app_store=true is NOT enough. An on-device
+//    snapshot showed every engagement link already stripped by this script
+//    and the tap STILL landed on the App Store — the bounce lives on the
+//    m.x.com host itself, not in the query param. m.x.com/<path> and
+//    x.com/<path> address the same post, so the fix is to swap the host and
+//    keep everything else (path, ct=engagement_* analytics param) intact.
+//  - Because attribute rewriting is debounced behind requestAnimationFrame —
+//    and because X may hold the original URL in its own JS state rather than
+//    reading the attribute back — a capture-phase click handler is the
+//    deterministic half of the fix: for a bounce link (and only for one) it
+//    cancels X's handling and navigates to the rewritten URL itself.
 
 (() => {
   'use strict';
 
   const APP_BANNER_LINK_SELECTOR = 'a[download][href*="launch_app_store=true"]';
   const APP_BANNER_CSS_SELECTOR = `aside:has(${APP_BANNER_LINK_SELECTOR})`;
+  // Two independent markers for the same thing, because a link can carry
+  // either: X's explicit launch_app_store=true flag, and the m./mobile. host
+  // that bounces on its own. Kept as literal substrings so the selector is
+  // greppable; a loose match here costs nothing, since defuseAppStoreUrl()
+  // below re-checks the host precisely and leaves anything else untouched.
   const APP_STORE_HREF_SELECTOR =
-    '[href*="launch_app_store=true"], [data-href*="launch_app_store=true"]';
+    '[href*="launch_app_store=true"], [data-href*="launch_app_store=true"], ' +
+    '[href*="//m.x.com"], [data-href*="//m.x.com"], ' +
+    '[href*="//mobile.x.com"], [data-href*="//mobile.x.com"], ' +
+    '[href*="//m.twitter.com"], [data-href*="//m.twitter.com"], ' +
+    '[href*="//mobile.twitter.com"], [data-href*="//mobile.twitter.com"]';
   // Prefix-matched so a renamed root (…-obstruction-dialog) is still caught,
   // and so the -backdrop / -panel children are covered by the CSS backstop
   // even if the root itself is ever restructured. Everything X names
@@ -110,6 +127,29 @@
       .replace(/[?&]$/, '');
   }
 
+  // m.x.com/<path> and x.com/<path> address the same post — only the host
+  // differs — so swapping it drops the App Store bounce without changing
+  // where the tap goes. Anchored at the start and followed by a path/query/
+  // fragment boundary so nothing else in the URL can be rewritten by accident.
+  function demobilizeHost(url) {
+    return url.replace(
+      /^(https?:\/\/)(?:m|mobile)\.(x|twitter)\.com(?=[/?#]|$)/i,
+      '$1$2.com',
+    );
+  }
+
+  // Both defusals, in one place: every caller wants the same transformation,
+  // and a URL that is neither flagged nor mobile-hosted comes back identical
+  // (that identity is what tells the click handler to keep its hands off).
+  function defuseAppStoreUrl(url) {
+    return demobilizeHost(stripAppStoreParam(url));
+  }
+
+  // Elements whose URL we already rewrote. The click handler still has to
+  // cancel X's own handling for these — the attribute is defused, but X may
+  // navigate from its own copy of the original URL, which we cannot reach.
+  const defusedEls = new WeakSet();
+
   function defuseAppStoreLinks() {
     let hit = false;
     let els;
@@ -117,13 +157,36 @@
     for (const el of els) {
       for (const attr of ['href', 'data-href']) {
         const val = el.getAttribute(attr);
-        if (val && val.includes('launch_app_store=true')) {
-          el.setAttribute(attr, stripAppStoreParam(val));
+        if (!val) continue;
+        const next = defuseAppStoreUrl(val);
+        if (next !== val) {
+          el.setAttribute(attr, next);
+          defusedEls.add(el);
           hit = true;
         }
       }
     }
     return hit;
+  }
+
+  // --- Cancel the bounce at tap time -----------------------------------------
+  // Attribute rewriting alone leaves two holes: a tap can beat the debounced
+  // pass on a just-rendered reply row, and X's handler may not read the
+  // attribute back at all. Capture-phase, so it runs before X's listeners.
+  // Scoped to links we would rewrite or already did — an ordinary X link is
+  // returned unchanged by defuseAppStoreUrl() and is left entirely alone.
+  function onClickCapture(e) {
+    const el = e.target && e.target.closest && e.target.closest('[href], [data-href]');
+    if (!el) return;
+    const attr = el.hasAttribute('href') ? 'href' : 'data-href';
+    const raw = el.getAttribute(attr);
+    if (!raw) return;
+    const next = defuseAppStoreUrl(raw);
+    if (next === raw && !defusedEls.has(el)) return;
+    if (next !== raw) el.setAttribute(attr, next);
+    e.preventDefault();
+    e.stopPropagation();
+    window.location.assign(next);
   }
 
   // --- Inject a race-free CSS backstop ----------------------------------------
@@ -165,6 +228,10 @@
 
   // First pass as early as possible.
   run();
+
+  // Installed once, before anything can be tapped. Independent of the observer
+  // so it survives even if the DOM passes miss a lazily-rendered control.
+  document.addEventListener('click', onClickCapture, true);
 
   // Watch for lazy injection of the banner and for scroll-lock re-application.
   const observer = new MutationObserver(schedule);

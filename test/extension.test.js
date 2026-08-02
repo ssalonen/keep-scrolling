@@ -158,14 +158,66 @@ test('stripAppStoreParam removes only the launch_app_store=true flag, preserving
   );
 });
 
-test('X script defuses launch_app_store=true on both href and data-href (engagement buttons and whole-row tap targets)', () => {
+test('demobilizeHost swaps only the m./mobile. bounce host, leaving the rest of the URL alone', () => {
+  // The param strip is NOT the fix on its own: an on-device snapshot showed
+  // every engagement link already stripped and the tap still landing on the
+  // App Store. The bounce is the m.x.com host itself.
+  const match = scriptX.match(/function demobilizeHost\(url\) \{[\s\S]*?\n  \}/);
+  assert.ok(match, 'demobilizeHost function not found in source');
+  const demobilizeHost = new Function(`${match[0]}; return demobilizeHost;`)();
+
+  assert.equal(
+    demobilizeHost('https://m.x.com/i/status/1?ct=engagement_reply'),
+    'https://x.com/i/status/1?ct=engagement_reply',
+  );
+  assert.equal(demobilizeHost('https://mobile.x.com/foo/status/1'), 'https://x.com/foo/status/1');
+  assert.equal(demobilizeHost('https://m.twitter.com/i/status/1'), 'https://twitter.com/i/status/1');
+  // Untouched: already-apex hosts, unrelated hosts, and any host merely
+  // *containing* the pattern rather than starting with it.
+  assert.equal(demobilizeHost('https://x.com/i/status/1'), 'https://x.com/i/status/1');
+  assert.equal(demobilizeHost('https://pbs.twimg.com/media/x.jpg'), 'https://pbs.twimg.com/media/x.jpg');
+  assert.equal(demobilizeHost('https://evil.com/?u=https://m.x.com/i'), 'https://evil.com/?u=https://m.x.com/i');
+  assert.equal(demobilizeHost('https://m.x.com.evil.com/i'), 'https://m.x.com.evil.com/i');
+  assert.equal(demobilizeHost('/i/status/1'), '/i/status/1');
+});
+
+test('X script defuses the app-store bounce on both href and data-href (engagement buttons and whole-row tap targets)', () => {
   assert.ok(scriptX.includes('function defuseAppStoreLinks'), 'defuseAppStoreLinks() must exist');
-  for (const sig of ['[href*="launch_app_store=true"]', '[data-href*="launch_app_store=true"]']) {
+  for (const sig of [
+    '[href*="launch_app_store=true"]', '[data-href*="launch_app_store=true"]',
+    '[href*="//m.x.com"]', '[data-href*="//m.x.com"]',
+    '[href*="//m.twitter.com"]', '[data-href*="//m.twitter.com"]',
+  ]) {
     assert.ok(scriptX.includes(sig), `missing selector: ${sig}`);
   }
   assert.ok(
     /run\(\)\s*\{[\s\S]*?defuseAppStoreLinks\(\);/.test(scriptX),
     'defuseAppStoreLinks() must run on every pass alongside killNags()',
+  );
+  assert.ok(
+    /function defuseAppStoreUrl\(url\) \{\s*return demobilizeHost\(stripAppStoreParam\(url\)\);/.test(scriptX),
+    'both defusals must be applied together — the param strip alone does not stop the bounce',
+  );
+});
+
+test('X script cancels the bounce at tap time, but only for links it would rewrite', () => {
+  // Two holes the attribute rewrite cannot close: a tap that beats the
+  // debounced pass on a freshly-rendered reply row, and X navigating from its
+  // own copy of the URL instead of reading the attribute back.
+  assert.ok(
+    /document\.addEventListener\('click', onClickCapture, true\)/.test(scriptX),
+    'the click handler must be registered in the capture phase, before X\'s own listeners',
+  );
+  const match = scriptX.match(/function onClickCapture\(e\) \{[\s\S]*?\n  \}/);
+  assert.ok(match, 'onClickCapture function not found in source');
+  assert.ok(
+    /if\s*\(next === raw && !defusedEls\.has\(el\)\) return;/.test(match[0]),
+    'an ordinary X link (unchanged by defuseAppStoreUrl, never defused) must be left entirely alone — ' +
+      'preventDefault on those would break normal navigation across the site',
+  );
+  assert.ok(
+    /e\.preventDefault\(\);[\s\S]*?window\.location\.assign\(next\)/.test(match[0]),
+    'a bounce link must be cancelled and navigated to the rewritten URL instead',
   );
 });
 

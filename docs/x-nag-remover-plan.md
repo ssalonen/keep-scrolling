@@ -109,29 +109,61 @@ go with it.
   Reddit script, since X's client-side routing produces DOM mutations the
   observer already watches.
 
-## Defusing the app-store bounce on engagement links (`defuseAppStoreLinks()`)
+## Defusing the app-store bounce on engagement links
 The banner isn't the only app-install nag on a logged-out status page.
 On-device testing (a `rcarmo`/`ChimikArt` status page snapshot) showed that
 every engagement control — Reply, Repost, Like, Bookmark, and the whole-row
 tap target on a reply — carries `href`/`data-href` values like
 `https://m.x.com/i/status/<id>?launch_app_store=true&ct=engagement_reply`.
-`launch_app_store=true` is X's own explicit signal to bounce the tap to the
-App Store, independent of the `<aside>` banner and without a `download`
-attribute, so it needed separate handling:
+These have no `download` attribute and no `<aside>` wrapper, so they are a
+separate mechanism from the banner and need their own handling.
 
-- `defuseAppStoreLinks()` matches `[href*="launch_app_store=true"],
-  [data-href*="launch_app_store=true"]` and rewrites the attribute via
-  `stripAppStoreParam()`, which removes only the `launch_app_store=true`
-  flag (with its `&`/`?`), leaving the rest of the URL — including the
-  `ct=engagement_*` analytics param — untouched, so the tap still navigates
-  to the real m.x.com endpoint instead of being redirected to the store.
-- Runs alongside `killNags()` in the same debounced `run()`, so it covers
-  both the initial pass and lazily-loaded replies.
-- **Unverified whether this actually suppresses the bounce on-device.** The
-  hypothesis is that `launch_app_store=true` is the trigger and m.x.com
-  behaves normally without it; if m.x.com bounces regardless of the query
-  string, this needs a different approach (e.g. rewriting the host away from
-  m.x.com entirely).
+### The param strip was not enough — the host is the bounce
+The first attempt assumed `launch_app_store=true` was the trigger and stripped
+just that flag. A later on-device snapshot settled it: the page carried our
+`<style id="xnr-style">`, *every* engagement link had already been stripped
+down to `https://m.x.com/i/status/<id>?ct=engagement_view_post` — and the tap
+still landed on the App Store. **`m.x.com` bounces on its own**, which is the
+alternative the previous version of this doc flagged as a caveat.
+
+`defuseAppStoreUrl()` now applies both defusals:
+
+- `stripAppStoreParam()` — removes only the `launch_app_store=true` flag (with
+  its `&`/`?`), byte-preserving for the rest of the query string.
+- `demobilizeHost()` — rewrites a leading `m.`/`mobile.` host to the apex
+  (`m.x.com` → `x.com`, `m.twitter.com` → `twitter.com`). Anchored at the start
+  of the URL and followed by a `/`, `?`, `#` or end-of-string boundary, so
+  `https://m.x.com.evil.com/…` and `https://evil.com/?u=https://m.x.com/…` are
+  both left alone. `m.x.com/<path>` and `x.com/<path>` address the same post,
+  so the tap still goes where X pointed it, `ct=engagement_*` and all.
+
+`APP_STORE_HREF_SELECTOR` matches on either marker (the flag *or* the mobile
+host), since a link can carry one without the other.
+
+### Two layers, both needed (`defuseAppStoreLinks()` + `onClickCapture`)
+Rewriting the attributes on each debounced pass leaves two holes:
+
+1. **The race.** `run()` is debounced behind `requestAnimationFrame`; a tap on
+   a just-rendered reply row can land before the rewrite does.
+2. **X's own state.** Nothing guarantees X reads the attribute back at click
+   time — it may navigate from the URL it holds in JS state, which a content
+   script cannot reach. In that case attribute rewriting is inert, and worse,
+   it *hides* the problem: the attribute looks defused while the tap still
+   bounces. This is consistent with what the on-device snapshot showed.
+
+`onClickCapture` closes both: a capture-phase `click` listener on `document`
+that, for a bounce link, calls `preventDefault()` + `stopPropagation()` before
+any X listener runs and navigates to the rewritten URL itself.
+
+- It acts **only** on a link `defuseAppStoreUrl()` would change, or one already
+  rewritten (tracked in a `defusedEls` `WeakSet`, since those come back
+  unchanged from `defuseAppStoreUrl()` on the second look). Every other link is
+  returned untouched — cancelling an ordinary X link would break navigation
+  site-wide. `test/extension.test.js` guards this.
+- The cost is a full page load instead of an SPA transition on those specific
+  controls. That is the intended trade: the alternative is the App Store.
+- A `WeakSet` rather than a marker attribute, so nothing is added to X's DOM
+  that its hydration could trip over.
 
 ## What it must never touch
 The same page also renders a legally-required cookie-consent banner:
@@ -183,13 +215,24 @@ background gradient are gone, the page scrolls normally, and the
 cookie-consent banner is still present and functional (negative-control check
 against over-matching).
 
+Then tap the engagement controls, which is what the App Store bounce actually
+rides on: **Reply, Repost, Like, Bookmark, and a reply row itself** must all
+stay in Safari (they land on the post's `x.com` page) instead of opening the
+App Store. Tapping a username, a timestamp or the quoted post must still work
+normally — if ordinary navigation breaks, `onClickCapture` is over-matching.
+
 ## Headless regression run (no device needed)
 The removal logic is DOM-only, so it can be driven in a desktop browser
 against a fixture of the on-device snapshot: load the page with the content
 script injected at document start, then assert the modal and banner are gone,
-the scroll lock and `pointer-events` are released, the engagement links have
-lost `launch_app_store=true`, and the cookie-consent banner plus any in-flow
-`<aside>` are untouched. That run is what caught `injectStyle()` throwing on
+the scroll lock and `pointer-events` are released, the engagement links point
+at `x.com` with no `launch_app_store=true`, and the cookie-consent banner plus
+any in-flow `<aside>` are untouched. Route the browser's document requests back
+to the fixture and record them, and the tap behaviour becomes checkable too:
+tapping Reply/Like/a reply row must request an `x.com` URL and never `m.x.com`
+— including with `requestAnimationFrame` stubbed out (the race) and with a
+competing listener that navigates from a stale copy of the URL (X's own state).
+That run is what caught `injectStyle()` throwing on
 a null `document.documentElement` at `document_start` — an exception there
 aborts the script before the `MutationObserver` is installed, so the page
 gets no protection at all for the rest of its life. Both scripts now bail out
