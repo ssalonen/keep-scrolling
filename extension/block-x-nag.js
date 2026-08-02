@@ -31,6 +31,14 @@
 //    launch_app_store=true param (leaving the rest of the URL, e.g.
 //    ct=engagement_reply, intact) so the tap navigates normally instead of
 //    being redirected to the store.
+//  - A third, separate nag is the full-screen "See this post in the app"
+//    modal: role="dialog" aria-modal="true" with
+//    data-interaction="app-store-obstruction" (plus -backdrop / -panel
+//    children). It is a fixed inset-0 touch-none overlay, so it blocks the
+//    whole page, and it stays in the DOM when dismissed (data-state toggles
+//    between "open" and "closed"). We match the purpose-built
+//    data-interaction prefix — X's own name for it — not role="dialog",
+//    which legitimate UI also uses.
 
 (() => {
   'use strict';
@@ -39,6 +47,9 @@
   const APP_BANNER_CSS_SELECTOR = `aside:has(${APP_BANNER_LINK_SELECTOR})`;
   const APP_STORE_HREF_SELECTOR =
     '[href*="launch_app_store=true"], [data-href*="launch_app_store=true"]';
+  // Matches the obstruction dialog's root and its -backdrop / -panel children;
+  // removing the root takes the children with it, the rest is a no-op.
+  const APP_OBSTRUCTION_SELECTOR = '[data-interaction^="app-store-obstruction"]';
 
   // --- Release the page scroll (inline overflow/padding only) ----------------
   function releaseScroll() {
@@ -63,6 +74,15 @@
       const aside = a.closest('aside');
       const host = aside && getComputedStyle(aside).position === 'fixed' ? aside : a;
       host.remove();
+      hit = true;
+    }
+    // The "See this post in the app" obstruction dialog. Removed whenever
+    // present, including in its data-state="closed" form: it is nothing but
+    // the app-store nag, so there is no legitimate state to preserve.
+    let obstructions;
+    try { obstructions = document.querySelectorAll(APP_OBSTRUCTION_SELECTOR); } catch { obstructions = []; }
+    for (const el of obstructions) {
+      el.remove();
       hit = true;
     }
     // Only release scroll when we actually found the banner: X reuses plain
@@ -102,7 +122,11 @@
     style.id = 'xnr-style';
     style.textContent =
       `${APP_BANNER_CSS_SELECTOR} { display: none !important; }\n` +
-      `body:has(${APP_BANNER_CSS_SELECTOR}) { overflow: auto !important; }`;
+      `body:has(${APP_BANNER_CSS_SELECTOR}) { overflow: auto !important; }\n` +
+      // Plain attribute selector — no :has() needed, so this backstop also
+      // works on iOS/Safari older than 16.4.
+      `${APP_OBSTRUCTION_SELECTOR} { display: none !important; }\n` +
+      `body:has(${APP_OBSTRUCTION_SELECTOR}) { overflow: auto !important; }`;
     (document.head || document.documentElement).appendChild(style);
   }
 

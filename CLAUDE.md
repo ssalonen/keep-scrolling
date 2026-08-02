@@ -108,10 +108,25 @@ share code with the Reddit script (see `docs/x-nag-remover-plan.md` for why).
   that blindly removing any `<aside>` ancestor took out an in-flow reply-list
   region along with it, permanently stalling reply pagination — anchor-only
   removal is the safe fallback when the ancestor isn't the floating banner.
+- IMPORTANT: the `<aside>` banner is not the only blocking nag. A full-screen
+  **"See this post in the app" modal** (`role="dialog" aria-modal="true"`,
+  `fixed inset-0 touch-none`) is marked with
+  `data-interaction="app-store-obstruction"` (plus `-backdrop` / `-panel`
+  children) and carries no `launch_app_store` link at all, so neither
+  `killNags()`'s banner path nor `defuseAppStoreLinks()` saw it.
+  `killNags()` removes anything matching the prefix selector
+  `[data-interaction^="app-store-obstruction"]`. Match that marker — X's own
+  name for the thing — NOT `role="dialog"` / `aria-modal`, which legitimate
+  X modals also use, and NOT bare `data-interaction`, which tags ordinary
+  controls (`mobile-top-bar-log-in`). It is removed even when
+  `data-state="closed"` (it stays in the DOM and re-opens); it is nothing but
+  the nag, so there is no state worth keeping.
 - Unlike Reddit, `releaseScroll()` here only runs when the banner was found
   this pass. X's inline `overflow:hidden` idiom is likely reused by
   unrelated legitimate modals (compose box, image viewer), so releasing it
   unconditionally risks fighting those.
+- The obstruction-dialog hide rule is a plain attribute selector, so that
+  backstop works on any iOS. The banner rules below still need `:has()`.
 - The injected CSS backstop uses `:has()` (iOS/Safari 16.4+); the JS
   `killNags()` removal path via `MutationObserver` doesn't depend on it and
   still works on older iOS, just without the early-hide race protection.

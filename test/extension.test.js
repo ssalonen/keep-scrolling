@@ -133,6 +133,29 @@ test('X script defuses launch_app_store=true on both href and data-href (engagem
   );
 });
 
+test('X script removes the "See this post in the app" obstruction dialog by its data-interaction marker', () => {
+  assert.ok(
+    scriptX.includes('[data-interaction^="app-store-obstruction"]'),
+    'must match the obstruction dialog by X\'s own purpose-built data-interaction name',
+  );
+});
+
+test('X script never matches role=dialog or aria-modal alone (must not catch legitimate modals)', () => {
+  // Attribute-selector form only ever appears in a selector, never in prose.
+  for (const sig of ['[role="dialog"]', '[aria-modal']) {
+    assert.ok(
+      !scriptX.includes(sig),
+      `must not select on ${sig} — legitimate X UI (menus, share sheets) uses it too`,
+    );
+  }
+  // Every data-interaction selector must be app-store-obstruction-scoped —
+  // the attribute also tags legitimate controls (e.g. mobile-top-bar-log-in).
+  const total = (scriptX.match(/\[data-interaction/g) || []).length;
+  const scoped = (scriptX.match(/\[data-interaction\^="app-store-obstruction"\]/g) || []).length;
+  assert.ok(total > 0, 'expected the app-store-obstruction selector');
+  assert.equal(scoped, total, 'all data-interaction selectors must be app-store-obstruction-scoped');
+});
+
 test('X script releases scroll only when the banner is found', () => {
   assert.ok(/function\s+releaseScroll/.test(scriptX), 'releaseScroll() must exist');
   assert.ok(/function\s+killNags/.test(scriptX), 'killNags() must exist');
