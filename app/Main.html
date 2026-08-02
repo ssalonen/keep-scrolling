@@ -42,8 +42,22 @@
         box-sizing: border-box;
     }
 
+    /* Scrolling. The page is taller than a phone screen, and the converter's
+       host disables the web view's own scroll view on iOS
+       (`webView.scrollView.isScrollEnabled = false` — the template's page is
+       one line of text, so it never needed to scroll). generate_project flips
+       that back on, but an in-page scroll container is what makes the page
+       readable even if a future template moves or renames that line: an
+       overflow:auto element scrolls inside WebKit regardless of what the host
+       does to the enclosing scroll view. */
+    html,
+    body {
+        height: 100%;
+    }
+
     body {
         margin: 0;
+        overflow: hidden;
         background: var(--bg);
         color: var(--text);
         font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
@@ -54,6 +68,10 @@
     }
 
     main {
+        height: 100%;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior: contain;
         max-width: 640px;
         margin: 0 auto;
         /* viewport-fit=cover + safe-area padding: content clears the notch, the
@@ -281,7 +299,7 @@
                 </span>
                 <div>
                     <h3>X’s “Open X App” banner too</h3>
-                    <p>Clears the bottom banner and the top-bar pill, and stops Reply, Like and Repost taps from bouncing you to the App Store.</p>
+                    <p>Clears the “See this post in the app” pop-up, the bottom banner and the top-bar pill, and stops Reply, Like and Repost taps from bouncing you to the App Store.</p>
                 </div>
             </div>
 

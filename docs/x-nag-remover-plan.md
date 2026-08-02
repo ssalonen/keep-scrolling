@@ -42,6 +42,44 @@ the cookie-consent banner rendered directly underneath the bottom
 the two are independent, stacked elements, matching the "must never touch"
 assumption below.
 
+## The blocking "See this post in the app" modal (added after on-device testing)
+A second, **blocking** variant showed up on a logged-out status page — the
+banner work above did nothing for it, because it is not an `<aside>` and
+carries no `launch_app_store` link at all:
+
+```html
+<div role="dialog" aria-modal="true" data-state="open"
+     data-interaction="app-store-obstruction"
+     class="group fixed inset-0 z-50 flex touch-none items-center justify-center">
+  <div aria-hidden="true" data-interaction="app-store-obstruction-backdrop"></div>
+  <div data-interaction="app-store-obstruction-panel">
+    <p>See this post in the app</p>
+    <p>Use the app to view all comments and discover more posts.</p>
+  </div>
+  <button aria-label="Dismiss">…</button>
+</div>
+```
+
+It covers the viewport (`fixed inset-0`) and sets `touch-action: none`, so it
+is *both* halves of the problem at once: the nag itself and the scroll lock.
+Removing the dialog root is therefore the whole fix — the backdrop and panel
+go with it.
+
+- Matched by `[data-interaction^="app-store-obstruction"]`: X's own semantic
+  name for the component, in the same spirit as `launch_app_store=true`.
+  Prefix-matched so the `-backdrop`/`-panel` children (and a renamed root)
+  stay covered.
+- **Never** matched by `role="dialog"`, `aria-modal`, or the `touch-none`
+  class. X renders the share menu, the verified-badge popover and other
+  legitimate dialogs with exactly that shape; a selector on those would take
+  the site apart. `test/extension.test.js` fails if any of those strings
+  appears in the script's code.
+- Its CSS backstop needs no `:has()`, so unlike the banner's it also protects
+  pre-16.4 iOS from the earliest paint.
+- `releaseScroll()` additionally clears an inline `pointer-events: none` —
+  the modal's lock disables the page behind it that way — but only that exact
+  inline value, never a stylesheet-driven one.
+
 ## How it works
 - Matches the banner via `a[download][href*="launch_app_store=true"]` — the
   `download` attribute and the `launch_app_store=true` query param are
@@ -140,6 +178,19 @@ has an explicit regression guard for this.
 
 ## Manual on-device test (once installed via TestFlight)
 Open a logged-out `x.com` (and `twitter.com`) status page in Safari. PASS =
-the "Open X App" banner and its background gradient are gone, the page
-scrolls normally, and the cookie-consent banner is still present and
-functional (negative-control check against over-matching).
+no "See this post in the app" pop-up, the "Open X App" banner and its
+background gradient are gone, the page scrolls normally, and the
+cookie-consent banner is still present and functional (negative-control check
+against over-matching).
+
+## Headless regression run (no device needed)
+The removal logic is DOM-only, so it can be driven in a desktop browser
+against a fixture of the on-device snapshot: load the page with the content
+script injected at document start, then assert the modal and banner are gone,
+the scroll lock and `pointer-events` are released, the engagement links have
+lost `launch_app_store=true`, and the cookie-consent banner plus any in-flow
+`<aside>` are untouched. That run is what caught `injectStyle()` throwing on
+a null `document.documentElement` at `document_start` — an exception there
+aborts the script before the `MutationObserver` is installed, so the page
+gets no protection at all for the rest of its life. Both scripts now bail out
+and retry instead; keep it that way.

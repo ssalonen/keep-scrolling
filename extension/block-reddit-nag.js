@@ -82,7 +82,12 @@
 
   // --- Inject the static cosmetic-hide stylesheet -----------------------------
   function injectStyle() {
-    if (document.getElementById('rnr-style')) return;
+    // No document element to append to yet (possible at document_start): bail
+    // out rather than throw. An exception here would propagate out of the first
+    // run() call and abort the script before the observer is installed — see
+    // the same guard in block-x-nag.js. Later passes retry.
+    const root = document.head || document.documentElement;
+    if (!root || document.getElementById('rnr-style')) return;
     const style = document.createElement('style');
     style.id = 'rnr-style';
     style.textContent =
@@ -107,7 +112,7 @@
       'html.rpl-scroll-lock, body.rpl-scroll-lock,\n' +
       'html.scroll-is-blocked, body.scroll-is-blocked' +
       ' { overflow: auto !important; padding-right: 0 !important; }';
-    (document.head || document.documentElement).appendChild(style);
+    root.appendChild(style);
   }
 
   // --- Debounced runner driven by the observer --------------------------------
