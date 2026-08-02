@@ -146,9 +146,16 @@ it has to fix four things the converter gets wrong or leaves unset:
    paths, so nothing has to be registered with `xcodeproj`. A fourth file would
    be copied and then silently *not* bundled — hence the three-file limit, which
    `apply_app_ui` enforces by erroring if a listed file is missing on either
-   side. It also locates the resources directory by globbing for the template's
-   `Main.html` rather than hard-coding `Shared (App)/Resources`, since that path
-   has moved between converter versions.
+   side. Each file is located by globbing the generated project for its own
+   name, not by assuming a shared directory: **the template does not keep the
+   three together** — it localizes the page, so `Main.html` is at
+   `<App>/Resources/Base.lproj/Main.html` while `Style.css` and `Script.js` sit
+   in `<App>/Resources/` above it. The v0.5.0 release failed on exactly that
+   assumption (and failed *loudly*, which is the point of the guard). Globbing
+   per file also means no layout is hard-coded, so the next rearrangement is
+   absorbed rather than fatal; if a name ever resolves to zero or several files,
+   the error lists every web resource the template did generate, so diagnosis
+   takes one failed run rather than one per release.
 
 Patching a generated project is safe **because it is a build artifact** under
 `build/gen`, regenerated from scratch every run. This is the opposite of the bug
