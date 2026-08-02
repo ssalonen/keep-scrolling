@@ -242,38 +242,45 @@ end
 # be registered with xcodeproj as well, and would silently ship missing
 # otherwise — hence the deliberate three-file limit.
 def apply_app_ui(marketing_version, build_number)
-  # Locate the app's Resources by its Main.html rather than by a hard-coded
-  # "Shared (App)/Resources" path, which the converter has moved before.
-  mains = Dir.glob(File.join(GEN_DIR, "**", "Main.html"))
-  if mains.size != 1
-    UI.user_error!(
-      "Expected exactly 1 container-app Main.html under #{GEN_DIR}, found #{mains.size}: " \
-      "#{mains.inspect}. safari-web-extension-converter's app template changed — update apply_app_ui."
-    )
-  end
-  dest_dir = File.dirname(mains.first)
-
+  # Resolve each file's destination SEPARATELY. The three do not live in one
+  # directory: the converter localizes the page, so Main.html is at
+  # Resources/Base.lproj/Main.html while Style.css and Script.js sit in
+  # Resources/ above it. Assuming Main.html's own directory held all three is
+  # what failed the v0.5.0 release. Globbing per file also keeps this working if
+  # the template rearranges again — the layout is not hard-coded anywhere.
+  dests = {}
   APP_UI_FILES.each do |name|
     src = File.join(APP_UI_DIR, name)
     UI.user_error!("Missing container-app UI file: #{src}") unless File.exist?(src)
-    dest = File.join(dest_dir, name)
-    UI.user_error!(
-      "#{name} is not part of the generated app template (expected at #{dest}) — it would be " \
-      "copied but never bundled. Register it with xcodeproj or drop it from APP_UI_FILES."
-    ) unless File.exist?(dest)
-    FileUtils.cp(src, dest)
+
+    matches = Dir.glob(File.join(GEN_DIR, "**", name))
+    if matches.size == 1
+      dests[name] = matches.first
+    else
+      # Overwriting the template's own files in place is precisely what keeps
+      # them bundled, so there is no safe way to continue. List what the
+      # template does ship, so a template change is diagnosable from one failed
+      # run instead of one per release.
+      UI.user_error!(
+        "Expected exactly 1 #{name} in the generated project, found #{matches.size}: #{matches.inspect}. " \
+        "safari-web-extension-converter's app template changed — update apply_app_ui. Web resources " \
+        "it generated: #{Dir.glob(File.join(GEN_DIR, '**', '*.{html,css,js}')).inspect}"
+      )
+    end
   end
+
+  dests.each { |name, dest| FileUtils.cp(File.join(APP_UI_DIR, name), dest) }
 
   # Stamp the shipped version into the page footer. Done here, not in the HTML,
   # because the version only exists as the git tag at build time.
-  main_html = File.join(dest_dir, "Main.html")
+  main_html = dests.fetch("Main.html")
   contents = File.read(main_html)
   unless contents.include?(APP_UI_VERSION_TOKEN)
     UI.user_error!("#{APP_UI_VERSION_TOKEN} is missing from app/Main.html — the built app would show no version")
   end
   File.write(main_html, contents.gsub(APP_UI_VERSION_TOKEN, "Version #{marketing_version} (#{build_number})"))
 
-  UI.message("Applied container-app UI from app/ into #{dest_dir}")
+  UI.message("Applied container-app UI from app/: #{dests.values.map { |p| p.sub("#{GEN_DIR}/", '') }.join(', ')}")
 end
 
 def find_target(proj, product_type, description)

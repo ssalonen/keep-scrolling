@@ -151,6 +151,11 @@ insets, **zero network requests**.
   **in place**; do not add files. The generated project already references
   exactly those three paths, so anything new would be copied but never bundled
   unless it is also registered with `xcodeproj`.
+- IMPORTANT: the three are NOT in one directory. The converter localizes the
+  page: `Main.html` lands in `<App>/Resources/Base.lproj/`, `Style.css` and
+  `Script.js` in `<App>/Resources/`. `apply_app_ui` therefore globs for each
+  file by name — never assume a shared parent (that assumption failed the
+  v0.5.0 release).
 - Keep the two host contracts from Apple's template: a global
   `show(platform, enabled, useSettingsInsteadOfPreferences)` (the ViewController
   calls it via `evaluateJavaScript`) and the `"open-preferences"` message to
