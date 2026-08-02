@@ -71,6 +71,30 @@ assumption below.
   Reddit script, since X's client-side routing produces DOM mutations the
   observer already watches.
 
+## Defusing the app-store bounce on engagement links (`defuseAppStoreLinks()`)
+The banner isn't the only app-install nag on a logged-out status page.
+On-device testing (a `rcarmo`/`ChimikArt` status page snapshot) showed that
+every engagement control — Reply, Repost, Like, Bookmark, and the whole-row
+tap target on a reply — carries `href`/`data-href` values like
+`https://m.x.com/i/status/<id>?launch_app_store=true&ct=engagement_reply`.
+`launch_app_store=true` is X's own explicit signal to bounce the tap to the
+App Store, independent of the `<aside>` banner and without a `download`
+attribute, so it needed separate handling:
+
+- `defuseAppStoreLinks()` matches `[href*="launch_app_store=true"],
+  [data-href*="launch_app_store=true"]` and rewrites the attribute via
+  `stripAppStoreParam()`, which removes only the `launch_app_store=true`
+  flag (with its `&`/`?`), leaving the rest of the URL — including the
+  `ct=engagement_*` analytics param — untouched, so the tap still navigates
+  to the real m.x.com endpoint instead of being redirected to the store.
+- Runs alongside `killNags()` in the same debounced `run()`, so it covers
+  both the initial pass and lazily-loaded replies.
+- **Unverified whether this actually suppresses the bounce on-device.** The
+  hypothesis is that `launch_app_store=true` is the trigger and m.x.com
+  behaves normally without it; if m.x.com bounces regardless of the query
+  string, this needs a different approach (e.g. rewriting the host away from
+  m.x.com entirely).
+
 ## What it must never touch
 The same page also renders a legally-required cookie-consent banner:
 ```html
