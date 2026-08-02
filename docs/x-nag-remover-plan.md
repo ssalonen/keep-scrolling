@@ -71,6 +71,59 @@ assumption below.
   Reddit script, since X's client-side routing produces DOM mutations the
   observer already watches.
 
+## The "See this post in the app" obstruction dialog
+A later snapshot (a `KongBTC` status page, logged out, taken *with the
+extension already active* — the injected `<style id="xnr-style">` is visible
+in the markup) showed no `<aside>` banner at all. Instead the page was
+blocked by a full-screen modal:
+
+```html
+<div role="dialog" aria-modal="true" data-state="open"
+     data-interaction="app-store-obstruction"
+     class="group fixed inset-0 z-50 flex touch-none ...">
+  <div aria-hidden="true" data-interaction="app-store-obstruction-backdrop" ...></div>
+  <div data-interaction="app-store-obstruction-panel" ...>
+    <p>See this post in the app</p>
+    <p>Use the app to view all comments and discover more posts.</p>
+    ...an animated tap-hand SVG, no link at all...
+  </div>
+  <button aria-label="Dismiss">…</button>
+</div>
+```
+
+It is a third, independent mechanism: it contains **no** `launch_app_store`
+link and no `<aside>`, so neither `killNags()`'s banner path nor
+`defuseAppStoreLinks()` could see it. `fixed inset-0` + `touch-none` means it
+swallows the whole viewport whether or not the body is scroll-locked.
+
+- Matched by `[data-interaction^="app-store-obstruction"]` — X's own
+  purpose-built, semantically-named marker, the direct analogue of Reddit's
+  `[id*="app-upsell-blocking"]`. The `^=` prefix form catches the root and its
+  `-backdrop` / `-panel` children in one selector; removing the root takes the
+  children with it, so the remaining matches are no-ops.
+- Removed regardless of `data-state`. The class list
+  (`data-[state=closed]:pointer-events-none`) shows the dialog stays in the
+  DOM when dismissed and merely toggles state, so a "remove only when open"
+  rule would just wait for it to come back. There is no legitimate state to
+  preserve — the element is nothing but the nag.
+- Counts as a `hit` in `killNags()`, so the gated `releaseScroll()` also runs
+  for it. The snapshot's `<body>` carried no inline lock, but the dialog is
+  the kind of UI a scroll-lock library pairs with, and the release is
+  scoped to a pass that actually found a nag.
+- The CSS backstop rule for it is a plain attribute selector
+  (`[data-interaction^="app-store-obstruction"] { display:none !important }`),
+  so unlike the banner's `:has()` rules it needs no iOS 16.4+.
+- **Must not** be matched by `role="dialog"` / `aria-modal="true"` /
+  "fixed inset-0", nor by bare `data-interaction`: the same page tags
+  ordinary controls with `data-interaction="mobile-top-bar-log-in"`, and X's
+  menus and share sheets are real `role="dialog"` modals.
+  `test/extension.test.js` guards both.
+- Verified in headless Chromium against a fixture reproducing the snapshot's
+  structure: the dialog (root, backdrop, panel) is removed, while the
+  cookie-consent banner, a `data-interaction="mobile-top-bar-log-in"` modal,
+  and an in-flow `<aside>`'s pagination sentinel all survive. Still worth an
+  on-device confirmation on the live site.
+
 ## Defusing the app-store bounce on engagement links (`defuseAppStoreLinks()`)
 The banner isn't the only app-install nag on a logged-out status page.
 On-device testing (a `rcarmo`/`ChimikArt` status page snapshot) showed that
@@ -96,6 +149,12 @@ attribute, so it needed separate handling:
   m.x.com entirely).
 
 ## What it must never touch
+The page renders legitimate `role="dialog" aria-modal="true"` modals (menus,
+share sheets) and tags ordinary controls with `data-interaction` values like
+`mobile-top-bar-log-in` — which is why the obstruction dialog is matched by
+its `app-store-obstruction` name rather than by its dialog role or its
+fixed-full-screen shape.
+
 The same page also renders a legally-required cookie-consent banner:
 ```html
 <div role="region" aria-label="Cookie consent" class="... fixed inset-x-0 bottom-0 ...">
@@ -140,6 +199,8 @@ has an explicit regression guard for this.
 
 ## Manual on-device test (once installed via TestFlight)
 Open a logged-out `x.com` (and `twitter.com`) status page in Safari. PASS =
-the "Open X App" banner and its background gradient are gone, the page
-scrolls normally, and the cookie-consent banner is still present and
-functional (negative-control check against over-matching).
+the "Open X App" banner and its background gradient are gone, no
+"See this post in the app" modal appears (including after scrolling on, which
+is when it tends to fire), the page scrolls normally, replies keep paginating,
+and the cookie-consent banner is still present and functional
+(negative-control check against over-matching).
