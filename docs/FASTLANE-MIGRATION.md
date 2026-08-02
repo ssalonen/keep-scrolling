@@ -82,7 +82,7 @@ commits **no project at all** — Apple's `safari-web-extension-converter`
 generates the container app + extension appex from `extension/` at build time.
 
 That moves the generate-and-patch step into the Fastfile (`generate_project`), and
-it has to fix four things the converter gets wrong or leaves unset:
+it has to fix five things the converter gets wrong or leaves unset:
 
 1. **Bundle identifiers.** The converter builds the container app's
    `PRODUCT_BUNDLE_IDENTIFIER` from `--bundle-identifier`'s **prefix** plus
@@ -137,25 +137,41 @@ it has to fix four things the converter gets wrong or leaves unset:
 5. **The container app's UI.** The converter's app template is a single line of
    placeholder text ("You can turn on … in Settings") — and that page *is* the
    whole app the user sees on the home screen. `apply_app_ui` overwrites the
-   template's `Main.html` / `Style.css` / `Script.js` with the ones tracked in
-   `app/` (a feature overview + the enable steps) and substitutes the build's
-   version into the footer.
+   template's `Main.html` with the one tracked in `app/` (a feature overview +
+   the enable steps) and substitutes the build's version into the footer.
 
    It overwrites **in place**, never adds files: the generated project's file
-   references and Copy-Bundle-Resources phase already point at those three
-   paths, so nothing has to be registered with `xcodeproj`. A fourth file would
-   be copied and then silently *not* bundled — hence the three-file limit, which
-   `apply_app_ui` enforces by erroring if a listed file is missing on either
-   side. Each file is located by globbing the generated project for its own
-   name, not by assuming a shared directory: **the template does not keep the
-   three together** — it localizes the page, so `Main.html` is at
-   `<App>/Resources/Base.lproj/Main.html` while `Style.css` and `Script.js` sit
-   in `<App>/Resources/` above it. The v0.5.0 release failed on exactly that
-   assumption (and failed *loudly*, which is the point of the guard). Globbing
-   per file also means no layout is hard-coded, so the next rearrangement is
-   absorbed rather than fatal; if a name ever resolves to zero or several files,
-   the error lists every web resource the template did generate, so diagnosis
-   takes one failed run rather than one per release.
+   reference and Copy-Bundle-Resources phase already point at that path, so
+   nothing has to be registered with `xcodeproj`. A new file would be copied and
+   then silently *not* bundled.
+
+   **`app/Main.html` is therefore one self-contained file** — CSS, JS and the
+   app icon all inline. Two failed releases taught this the hard way, and both
+   are worth keeping in mind before "tidying" the page back into sibling files:
+
+   - **v0.5.0** assumed the app's web resources share a directory. They don't:
+     the converter localizes the page, so `Main.html` is at
+     `<App>/Resources/Base.lproj/Main.html` while other resources sit in
+     `<App>/Resources/` above it. Worse, that split survives into the built
+     bundle — localized resources land in `Base.lproj/` and plain ones at the
+     `.app` root — so a relative `href` from the page to a sibling would not
+     resolve at runtime even if the copy succeeded.
+   - **v0.5.1** assumed the template's file set matched ours. It ships **no
+     `Script.js` at all**, so there was nothing to overwrite.
+
+   Both failed *loudly* in `apply_app_ui`, which is the point of the guard —
+   nothing shipped. Files are located by globbing the generated project per
+   filename, so no layout is hard-coded and the next rearrangement is absorbed
+   rather than fatal; when a name resolves to zero or several files, the error
+   lists every web resource the template did generate, so diagnosis takes one
+   failed run rather than one per release.
+
+   One sharp edge in the version stamp: the substitution rewrites **every**
+   occurrence of `__APP_VERSION__` in the file. The page must contain exactly
+   one (the footer) — an occurrence inside the inline script would be rewritten
+   too, which is why the script detects an unsubstituted footer by shape
+   (`/^Version\s/`) instead of comparing against the token. `test/extension.test.js`
+   enforces the "exactly once" rule.
 
 Patching a generated project is safe **because it is a build artifact** under
 `build/gen`, regenerated from scratch every run. This is the opposite of the bug
@@ -181,9 +197,8 @@ against the inputs that produced it:
    until a human notices
 5. `block-reddit-nag.js`, `block-x-nag.js`, and `manifest.json` are actually
    inside the appex
-6. the container app bundles **our** `Main.html` (plus `Style.css` /
-   `Script.js`), with the build's version stamped in and no leftover
-   `__APP_VERSION__` placeholder
+6. the container app bundles **our** `Main.html`, with the build's version
+   stamped in and no leftover `__APP_VERSION__` placeholder
 
 (5) is the one that matters most: a correctly signed, correctly versioned IPA
 containing **no extension code** would sail through to TestFlight and simply do

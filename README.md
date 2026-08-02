@@ -50,9 +50,9 @@ full diagnosis and references.
 ## Development & releases
 
 - `extension/` — the MV3 web extension (the whole product).
-- `app/` — the container app's screen: a short overview of what the extension
-  does plus the enable steps. Copied over the converter's placeholder page at
-  build time by `apply_app_ui` in the Fastfile.
+- `app/Main.html` — the container app's screen: a short overview of what the
+  extension does plus the enable steps, as one self-contained page. Copied over
+  the converter's placeholder page at build time by `apply_app_ui`.
 - `test/extension.test.js` — `node:test` invariant guards; run with `node --test`.
 - `fastlane/` — signing (`match`) and release lanes; see
   [`docs/FASTLANE-MIGRATION.md`](docs/FASTLANE-MIGRATION.md).

@@ -31,7 +31,6 @@ jobs:
         run: |
           node --check extension/block-reddit-nag.js
           node --check extension/block-x-nag.js
-          node --check app/Script.js
 
       - name: Validate manifest.json parses
         run: node -e "JSON.parse(require('fs').readFileSync('extension/manifest.json','utf8'))"
