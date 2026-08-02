@@ -155,17 +155,25 @@ for why).
   (`m.x.com/<path>` and `x.com/<path>` are the same post, so the destination is
   preserved along with `ct=engagement_*`). Do not regress this back to a
   param-only strip.
-- The fix has two layers and needs both: `defuseAppStoreLinks()` rewrites the
-  attributes on every pass, and `onClickCapture` (capture-phase `click` on
-  `document`) cancels the tap and navigates to the rewritten URL itself. The
-  handler exists because attribute rewriting alone has two holes — a tap can
-  beat the rAF-debounced pass on a freshly-rendered reply row, and X may
-  navigate from its own copy of the URL without ever reading the attribute
-  back (that copy is unreachable from a content script).
-- IMPORTANT: `onClickCapture` must only ever act on a link `defuseAppStoreUrl()`
-  would change, or one already in the `defusedEls` WeakSet. Anything else must
-  return untouched — a `preventDefault()` on an ordinary X link would break
-  navigation across the whole site. `test/extension.test.js` guards this.
+  Evidence, not inference: across the 129 modules of X's logged-out entry
+  bundle, **0** reference `launch_app_store`, **0** reference `m.x.com`, and
+  the single `apps.apple.com` URL builder is never called (its one importer
+  takes the iOS-detection sibling to decide whether to show the "Open app"
+  pill). Nothing on the x.com page can reach the App Store — the bounce is
+  m.x.com's. `docs/x-nag-remover-plan.md` has the re-check recipe.
+- `defuseAppStoreLinks()` rewrites the attributes on every pass;
+  `onClickCapture` (capture-phase `click` on `document`, registered at
+  `document_start`) covers the window where a link is tappable but the
+  rAF-debounced pass has not reached it yet.
+- IMPORTANT: keep `onClickCapture` narrow, and note the asymmetry it turns on.
+  A rewritten `<a href>` is handed straight back to the page — the browser
+  follows it — so after the first pass the handler fires on nothing. The single
+  exception is a `<div role="link" data-href>` tap target (reply row, quoted
+  post): it has no native navigation to fall back on, so those stay in the
+  `noNativeNav` WeakSet and we complete the tap ourselves. Do NOT widen this to
+  remember every rewritten element — that forces a full page load on those
+  controls for the rest of the page's life, to defend against a mechanism the
+  bundle audit rules out. `test/extension.test.js` pins both halves.
 
 ## Container app UI (`app/`)
 The container app (the home-screen icon) does nothing functional — the product

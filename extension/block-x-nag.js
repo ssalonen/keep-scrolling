@@ -145,10 +145,13 @@
     return demobilizeHost(stripAppStoreParam(url));
   }
 
-  // Elements whose URL we already rewrote. The click handler still has to
-  // cancel X's own handling for these — the attribute is defused, but X may
-  // navigate from its own copy of the original URL, which we cannot reach.
-  const defusedEls = new WeakSet();
+  // Rewritten tap-targets that have NO native navigation to hand back to: a
+  // <div role="link" data-href> (a reply row, a quoted post) only navigates
+  // because X's own JS makes it. Rewriting its data-href helps only if that JS
+  // reads the attribute back at click time, which we cannot verify — so for
+  // these, and only these, we keep completing the navigation ourselves. A plain
+  // <a href> needs no such treatment: once rewritten, the browser follows it.
+  const noNativeNav = new WeakSet();
 
   function defuseAppStoreLinks() {
     let hit = false;
@@ -161,7 +164,7 @@
         const next = defuseAppStoreUrl(val);
         if (next !== val) {
           el.setAttribute(attr, next);
-          defusedEls.add(el);
+          if (attr === 'data-href' && !el.hasAttribute('href')) noNativeNav.add(el);
           hit = true;
         }
       }
@@ -169,12 +172,21 @@
     return hit;
   }
 
-  // --- Cancel the bounce at tap time -----------------------------------------
-  // Attribute rewriting alone leaves two holes: a tap can beat the debounced
-  // pass on a just-rendered reply row, and X's handler may not read the
-  // attribute back at all. Capture-phase, so it runs before X's listeners.
-  // Scoped to links we would rewrite or already did — an ordinary X link is
-  // returned unchanged by defuseAppStoreUrl() and is left entirely alone.
+  // --- Cancel the bounce at tap time (race safety net only) -------------------
+  // Narrow on purpose. The DOM passes are debounced behind requestAnimationFrame
+  // and the page's HTML is streamed, so there is a window where a link exists
+  // but has not been rewritten yet; a tap landing in it would still go to
+  // m.x.com. This closes exactly that window and nothing else.
+  //
+  // The test is the LIVE attribute: an <a href> we already rewrote resolves to
+  // x.com, comes back unchanged from defuseAppStoreUrl(), and is handed straight
+  // back to the page — so once the first pass has run this handler stops firing
+  // on every ordinary link and on every rewritten anchor. It does NOT keep
+  // hijacking rewritten anchors to guard against X navigating from its own copy
+  // of the URL: no such code exists — the logged-out bundle has no
+  // launch_app_store handling, no m.x.com reference, and its single App Store
+  // URL builder is never called. The one exception is noNativeNav (above),
+  // where returning early would mean the tap does nothing at all.
   function onClickCapture(e) {
     const el = e.target && e.target.closest && e.target.closest('[href], [data-href]');
     if (!el) return;
@@ -182,7 +194,7 @@
     const raw = el.getAttribute(attr);
     if (!raw) return;
     const next = defuseAppStoreUrl(raw);
-    if (next === raw && !defusedEls.has(el)) return;
+    if (next === raw && !noNativeNav.has(el)) return;
     if (next !== raw) el.setAttribute(attr, next);
     e.preventDefault();
     e.stopPropagation();

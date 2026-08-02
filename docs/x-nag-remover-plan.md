@@ -120,11 +120,36 @@ separate mechanism from the banner and need their own handling.
 
 ### The param strip was not enough — the host is the bounce
 The first attempt assumed `launch_app_store=true` was the trigger and stripped
-just that flag. A later on-device snapshot settled it: the page carried our
-`<style id="xnr-style">`, *every* engagement link had already been stripped
-down to `https://m.x.com/i/status/<id>?ct=engagement_view_post` — and the tap
-still landed on the App Store. **`m.x.com` bounces on its own**, which is the
-alternative the previous version of this doc flagged as a caveat.
+just that flag. It did not stop the redirect. A user snapshot showed the page
+carrying our `<style id="xnr-style">` with every engagement link already
+stripped to `https://m.x.com/i/status/<id>?ct=engagement_view_post` — but a
+snapshot cannot be captured at the moment of the redirect, so on its own it
+does not prove the strip ran before the tap.
+
+X's own client bundle does prove it. Reading the 129 modules in the logged-out
+entry graph (`entry-client-logged-out-*.js` and everything it statically
+imports, all public on `abs.twimg.com`):
+
+- **0** modules reference `launch_app_store`.
+- **0** modules reference `m.x.com`.
+- **1** module builds an App Store URL — `get-app-store-url-*.js`, returning
+  `https://apps.apple.com/app/apple-store/id333903271?pt=9551&ct=${clickSourceCode}&mt=8`
+  — and that builder is **never called**. Its only importer takes the
+  iOS-detection sibling from the same module (`import{r as re}`) and uses it as
+  a boolean, `let y = !t && (ze() || re())`, to decide whether to render the
+  top-bar "Open app" pill.
+
+So nothing on the x.com page can navigate to the App Store: the redirect is not
+initiated by x.com at all. And the `ct` values on those links are exactly the
+`clickSourceCode` slot in that URL — `ct=engagement_reply` in the href becomes
+`ct=engagement_reply` in the store URL. **`m.x.com` is what reads `ct` and
+bounces**, which is the alternative the previous version of this doc flagged as
+a caveat. Never navigating there is the fix.
+
+Re-check this if the behaviour ever changes: refetch the entry bundle, resolve
+its `./assets/*.js` imports, and grep the set for `apps.apple.com`,
+`launch_app_store` and `m.x.com`. If a call to the URL builder ever appears,
+the redirect has moved into the page and needs a different mechanism.
 
 `defuseAppStoreUrl()` now applies both defusals:
 
@@ -140,30 +165,32 @@ alternative the previous version of this doc flagged as a caveat.
 `APP_STORE_HREF_SELECTOR` matches on either marker (the flag *or* the mobile
 host), since a link can carry one without the other.
 
-### Two layers, both needed (`defuseAppStoreLinks()` + `onClickCapture`)
-Rewriting the attributes on each debounced pass leaves two holes:
+### The click handler (`onClickCapture`) and why it stays narrow
+`onClickCapture` is a capture-phase `click` listener on `document`. It exists
+for one reason: `run()` is debounced behind `requestAnimationFrame` and the
+page's HTML is streamed, so there is a window in which a link is tappable but
+not yet rewritten. Registering at `document_start` puts us ahead of X's own
+listeners, so a tap in that window is still caught.
 
-1. **The race.** `run()` is debounced behind `requestAnimationFrame`; a tap on
-   a just-rendered reply row can land before the rewrite does.
-2. **X's own state.** Nothing guarantees X reads the attribute back at click
-   time — it may navigate from the URL it holds in JS state, which a content
-   script cannot reach. In that case attribute rewriting is inert, and worse,
-   it *hides* the problem: the attribute looks defused while the tap still
-   bounces. This is consistent with what the on-device snapshot showed.
+Its scope is deliberately minimal, and the shape of the tap target decides it:
 
-`onClickCapture` closes both: a capture-phase `click` listener on `document`
-that, for a bounce link, calls `preventDefault()` + `stopPropagation()` before
-any X listener runs and navigates to the rewritten URL itself.
+- **`<a href>` — hand back after rewriting.** Once the attribute says `x.com`,
+  `defuseAppStoreUrl()` returns it unchanged, the handler returns, and the
+  browser's own navigation does the right thing. After the first pass this
+  handler fires on *nothing*: not on ordinary links, not on rewritten ones.
+- **`<div role="link" data-href>` — keep completing the tap.** A reply row or
+  quoted post navigates only because X's JS makes it; there is no native
+  behaviour to hand back to. Whether that JS re-reads `data-href` at click time
+  is unknown (no `data-href` handler appears in the entry graph — it lives in a
+  route chunk), so bailing out risks the tap doing nothing at all. Only these
+  are remembered, in a `noNativeNav` `WeakSet` — a WeakSet rather than a marker
+  attribute, so nothing is added to X's DOM for its hydration to trip over.
 
-- It acts **only** on a link `defuseAppStoreUrl()` would change, or one already
-  rewritten (tracked in a `defusedEls` `WeakSet`, since those come back
-  unchanged from `defuseAppStoreUrl()` on the second look). Every other link is
-  returned untouched — cancelling an ordinary X link would break navigation
-  site-wide. `test/extension.test.js` guards this.
-- The cost is a full page load instead of an SPA transition on those specific
-  controls. That is the intended trade: the alternative is the App Store.
-- A `WeakSet` rather than a marker attribute, so nothing is added to X's DOM
-  that its hydration could trip over.
+An earlier draft remembered *every* rewritten element, to defend against X
+navigating from its own copy of the URL. The bundle audit above rules that out,
+and the cost was real: it forced a full page load on those controls for the
+rest of the page's life. Do not reintroduce it. `test/extension.test.js` pins
+both halves of the rule.
 
 ## What it must never touch
 The same page also renders a legally-required cookie-consent banner:

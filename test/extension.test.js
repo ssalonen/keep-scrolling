@@ -200,10 +200,10 @@ test('X script defuses the app-store bounce on both href and data-href (engageme
   );
 });
 
-test('X script cancels the bounce at tap time, but only for links it would rewrite', () => {
-  // Two holes the attribute rewrite cannot close: a tap that beats the
-  // debounced pass on a freshly-rendered reply row, and X navigating from its
-  // own copy of the URL instead of reading the attribute back.
+test('X script cancels the bounce at tap time, but only in the pre-rewrite race window', () => {
+  // The one hole the attribute rewrite cannot close: run() is debounced behind
+  // requestAnimationFrame and the HTML is streamed, so a link can exist and be
+  // tappable before it has been rewritten.
   assert.ok(
     /document\.addEventListener\('click', onClickCapture, true\)/.test(scriptX),
     'the click handler must be registered in the capture phase, before X\'s own listeners',
@@ -211,13 +211,36 @@ test('X script cancels the bounce at tap time, but only for links it would rewri
   const match = scriptX.match(/function onClickCapture\(e\) \{[\s\S]*?\n  \}/);
   assert.ok(match, 'onClickCapture function not found in source');
   assert.ok(
-    /if\s*\(next === raw && !defusedEls\.has\(el\)\) return;/.test(match[0]),
-    'an ordinary X link (unchanged by defuseAppStoreUrl, never defused) must be left entirely alone — ' +
-      'preventDefault on those would break normal navigation across the site',
+    /const next = defuseAppStoreUrl\(raw\);\s*if \(next === raw && !noNativeNav\.has\(el\)\) return;/.test(match[0]),
+    'the decision must be taken from the LIVE attribute (plus the noNativeNav exception): a URL ' +
+      'defuseAppStoreUrl() leaves unchanged is handled by X normally. preventDefault on those ' +
+      'would break navigation across the site',
   );
   assert.ok(
     /e\.preventDefault\(\);[\s\S]*?window\.location\.assign\(next\)/.test(match[0]),
     'a bounce link must be cancelled and navigated to the rewritten URL instead',
+  );
+});
+
+test('X script keeps intercepting ONLY the tap-targets that have no native navigation', () => {
+  // A rewritten <a href> resolves to x.com, comes back unchanged from
+  // defuseAppStoreUrl() and is handed back to the page — the browser follows
+  // it. A <div role="link" data-href> has no such fallback: it navigates only
+  // because X's JS makes it, and whether that JS re-reads the attribute is
+  // unknown, so bailing out there would leave the tap doing nothing at all.
+  // That asymmetry — not "remember everything we touched" — is the rule.
+  assert.ok(
+    /if \(attr === 'data-href' && !el\.hasAttribute\('href'\)\) noNativeNav\.add\(el\)/.test(scriptX),
+    'only a data-href-only tap target may be remembered',
+  );
+  assert.ok(
+    /if \(next === raw && !noNativeNav\.has\(el\)\) return;/.test(scriptX),
+    'everything else must fall through to the page once its attribute is clean',
+  );
+  assert.ok(
+    scriptX.includes('const noNativeNav = new WeakSet();'),
+    'track it in a WeakSet — a marker attribute would add nodes/attrs to X\'s DOM that its ' +
+      'hydration could trip over',
   );
 });
 
