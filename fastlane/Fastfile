@@ -35,11 +35,25 @@ EXT_ID   = "#{APP_ID}.Extension"
 # locally, the parent of this Fastfile's directory.
 REPO_ROOT     = ENV["GITHUB_WORKSPACE"] || File.expand_path("..", __dir__)
 EXTENSION_DIR = File.join(REPO_ROOT, "extension")
+# Our container-app UI (feature overview + enable instructions), copied over the
+# placeholder page the converter generates. See apply_app_ui.
+APP_UI_DIR    = File.join(REPO_ROOT, "app")
 BUILD_DIR     = File.join(REPO_ROOT, "build")
 GEN_DIR       = File.join(BUILD_DIR, "gen")
 
 # The files that are the actual product — verified present in the shipped IPA.
 CONTENT_SCRIPTS = ["block-reddit-nag.js", "block-x-nag.js"]
+
+# The container app's web resources. These filenames are the template's, and
+# they are overwritten in place (never added) so the generated project's
+# existing file references and Copy-Bundle-Resources phase keep working.
+APP_UI_FILES = ["Main.html", "Style.css", "Script.js"]
+# Substituted into Main.html at build time; Script.js drops the element if this
+# ever survives into a build.
+APP_UI_VERSION_TOKEN = "__APP_VERSION__"
+# A string that exists only in *our* page, not in the converter's placeholder —
+# how verify_ipa proves the real UI shipped.
+APP_UI_MARKER = 'class="features"'
 
 platform :ios do
   desc "Sync signing material (read-only on CI) without building anything"
@@ -157,6 +171,11 @@ def generate_project(marketing_version, build_number)
   project_path = Dir.glob(File.join(GEN_DIR, "**", "*.xcodeproj")).min_by { |p| p.count(File::SEPARATOR) }
   UI.user_error!("safari-web-extension-converter produced no .xcodeproj under #{GEN_DIR}") if project_path.nil?
 
+  # 0. Replace the converter's placeholder container-app page with ours before
+  #    anything else touches the project, so a failure here stops the build
+  #    early rather than after signing.
+  apply_app_ui(marketing_version, build_number)
+
   proj = Xcodeproj::Project.open(project_path)
   app  = find_target(proj, "com.apple.product-type.application", "container app")
   ext  = find_target(proj, "com.apple.product-type.app-extension", "Safari extension appex")
@@ -207,6 +226,54 @@ def generate_project(marketing_version, build_number)
   proj.save
 
   [project_path, pick_scheme(project_path), app.name, ext.name]
+end
+
+# Overwrite the container app's web resources with the ones in app/.
+#
+# The container app is the icon on the home screen: the converter ships it as a
+# single line of placeholder text ("You can turn on … in Settings"), which is
+# the only thing a user ever sees of this app besides Safari's toggle. app/
+# replaces it with the feature overview + enable steps.
+#
+# It overwrites the template's three filenames in place instead of adding files,
+# so the generated project needs no modification: the file references and the
+# Copy Bundle Resources phase the converter already emitted keep pointing at
+# exactly these paths. Anything more (extra assets, renamed files) would have to
+# be registered with xcodeproj as well, and would silently ship missing
+# otherwise — hence the deliberate three-file limit.
+def apply_app_ui(marketing_version, build_number)
+  # Locate the app's Resources by its Main.html rather than by a hard-coded
+  # "Shared (App)/Resources" path, which the converter has moved before.
+  mains = Dir.glob(File.join(GEN_DIR, "**", "Main.html"))
+  if mains.size != 1
+    UI.user_error!(
+      "Expected exactly 1 container-app Main.html under #{GEN_DIR}, found #{mains.size}: " \
+      "#{mains.inspect}. safari-web-extension-converter's app template changed — update apply_app_ui."
+    )
+  end
+  dest_dir = File.dirname(mains.first)
+
+  APP_UI_FILES.each do |name|
+    src = File.join(APP_UI_DIR, name)
+    UI.user_error!("Missing container-app UI file: #{src}") unless File.exist?(src)
+    dest = File.join(dest_dir, name)
+    UI.user_error!(
+      "#{name} is not part of the generated app template (expected at #{dest}) — it would be " \
+      "copied but never bundled. Register it with xcodeproj or drop it from APP_UI_FILES."
+    ) unless File.exist?(dest)
+    FileUtils.cp(src, dest)
+  end
+
+  # Stamp the shipped version into the page footer. Done here, not in the HTML,
+  # because the version only exists as the git tag at build time.
+  main_html = File.join(dest_dir, "Main.html")
+  contents = File.read(main_html)
+  unless contents.include?(APP_UI_VERSION_TOKEN)
+    UI.user_error!("#{APP_UI_VERSION_TOKEN} is missing from app/Main.html — the built app would show no version")
+  end
+  File.write(main_html, contents.gsub(APP_UI_VERSION_TOKEN, "Version #{marketing_version} (#{build_number})"))
+
+  UI.message("Applied container-app UI from app/ into #{dest_dir}")
 end
 
 def find_target(proj, product_type, description)
@@ -295,6 +362,9 @@ end
 #   6. the content scripts and manifest are actually inside the appex — a signed,
 #      correctly-versioned IPA containing no extension code would otherwise sail
 #      through to TestFlight and simply do nothing on device
+#   7. the container app ships OUR overview page, versioned — if the converter
+#      moves its template, apply_app_ui's copy would land somewhere unbundled
+#      and the app would quietly fall back to Apple's placeholder line
 def verify_ipa(ipa, marketing_version, build_number)
   # Explicitly bash, not fastlane's default shell: this script uses arrays and
   # nullglob to count matches, which POSIX sh does not have.
@@ -360,7 +430,19 @@ def verify_ipa(ipa, marketing_version, build_number)
       find "$EXT" -name "$f" | grep -q . || { echo "::error::$f is not present in $(basename "$EXT") — the IPA would install an extension with no content script."; exit 1; }
     done
 
-    echo "OK: IPA ships '#{APP_DISPLAY_NAME}' (#{APP_ID} + #{EXT_ID}) at #{marketing_version} (#{build_number}) with the content scripts"
+    # The container app's own UI: our overview page, with the version stamped
+    # in. A converter template move would leave the placeholder page bundled and
+    # our copy sitting unreferenced on disk — invisible without this check.
+    MAIN_HTML="$(find "$APP" -name Main.html -print -quit)"
+    [ -n "$MAIN_HTML" ] || { echo "::error::no Main.html in $(basename "$APP") — the container app has no UI"; exit 1; }
+    grep -q '#{APP_UI_MARKER}' "$MAIN_HTML" || { echo "::error::the bundled Main.html is not the app/ overview page (missing '#{APP_UI_MARKER}') — the app would show the converter's placeholder text"; exit 1; }
+    grep -q '#{APP_UI_VERSION_TOKEN}' "$MAIN_HTML" && { echo "::error::the bundled Main.html still contains the raw #{APP_UI_VERSION_TOKEN} placeholder"; exit 1; }
+    grep -q 'Version #{marketing_version} (#{build_number})' "$MAIN_HTML" || { echo "::error::the bundled Main.html does not show version #{marketing_version} (#{build_number})"; exit 1; }
+    for f in #{APP_UI_FILES.map { |s| "\"#{s}\"" }.join(" ")}; do
+      [ -n "$(find "$APP" -name "$f" -print -quit)" ] || { echo "::error::$f is missing from $(basename "$APP") — the overview page would render unstyled or without its platform logic."; exit 1; }
+    done
+
+    echo "OK: IPA ships '#{APP_DISPLAY_NAME}' (#{APP_ID} + #{EXT_ID}) at #{marketing_version} (#{build_number}) with the content scripts and the app overview UI"
   BASH
 end
 

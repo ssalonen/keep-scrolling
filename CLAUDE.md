@@ -27,6 +27,9 @@ the independent `extension/block-x-nag.js`. Full background and references:
   of the Reddit script — see the "X/Twitter nag" section below.
 - `extension/manifest.json` — MV3 manifest declaring both content scripts.
 - `extension/icon-{48,96,128}.png` — extension icons.
+- `app/{Main.html,Style.css,Script.js}` — the container app's UI (feature
+  overview + enable steps). Copied over the converter's placeholder page by
+  `apply_app_ui` in the Fastfile — see "Container app UI" below.
 - `.github/workflows/` — CI/CD (see below).
 - `fastlane/` — `Fastfile` (lanes: `certificates`, `build`, `beta`), `Appfile`,
   `Matchfile`. Signing + release live here, not in workflow bash.
@@ -130,6 +133,31 @@ share code with the Reddit script (see `docs/x-nag-remover-plan.md` for why).
   `ct=engagement_reply`) intact, and runs on every pass alongside
   `killNags()`. **Unverified on-device** whether removing the param actually
   suppresses the bounce — see `docs/x-nag-remover-plan.md`.
+
+## Container app UI (`app/`)
+The container app (the home-screen icon) does nothing functional — the product
+is the extension — but it is the only screen a user ever sees, and the converter
+ships it as one line of placeholder text. `app/` replaces that with a short
+feature overview and the enable steps, in the same no-dependency spirit as the
+content scripts: system fonts, inline SVG glyphs, light + dark, safe-area
+insets, **zero network requests**.
+
+- `apply_app_ui` (Fastfile) copies the three files over the generated app's
+  resources and substitutes `__APP_VERSION__` in `Main.html` with the build's
+  version. `verify_ipa` then asserts the shipped `.app` really contains our page
+  at the right version — a converter template move would otherwise silently
+  re-ship Apple's placeholder.
+- IMPORTANT: overwrite the template's `Main.html` / `Style.css` / `Script.js`
+  **in place**; do not add files. The generated project already references
+  exactly those three paths, so anything new would be copied but never bundled
+  unless it is also registered with `xcodeproj`.
+- Keep the two host contracts from Apple's template: a global
+  `show(platform, enabled, useSettingsInsteadOfPreferences)` (the ViewController
+  calls it via `evaluateJavaScript`) and the `"open-preferences"` message to
+  `webkit.messageHandlers.controller` (macOS-only button).
+- Keep the overview truthful: `test/extension.test.js` asserts every host in
+  `manifest.json` is named on the page, so adding a third site to the manifest
+  fails CI until the copy mentions it.
 
 ## Conventions
 - Vanilla JS only, no dependencies, no build step for the script itself.

@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <title>Keep Scrolling</title>
+    <link rel="stylesheet" href="Style.css">
+    <script type="text/javascript" src="Script.js"></script>
+</head>
+<body>
+    <!-- Rendered inside the container app's WKWebView. Everything is local: no
+         network requests, no external fonts, no analytics. `show()` in
+         Script.js adds the platform-* / state-* classes the CSS keys off. -->
+    <main>
+        <header class="hero">
+            <img class="app-icon" src="Icon.png" width="96" height="96" alt="" onerror="this.remove()">
+            <h1>Keep Scrolling</h1>
+            <p class="tagline">Reddit and X, minus the “get the app” nags.</p>
+        </header>
+
+        <!-- Status pill: text swapped by show() once the app reports whether
+             the extension is enabled. Stays neutral when it doesn't know
+             (iOS never reports the state). -->
+        <p class="status" id="status">Safari extension</p>
+
+        <section class="features" aria-label="What it does">
+            <h2>What it does</h2>
+
+            <div class="card">
+                <span class="glyph" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="22" height="22"><path d="M4 6h16M4 12h16M4 18h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M3 3l18 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                </span>
+                <div>
+                    <h3>Reddit’s blocking sheet, gone</h3>
+                    <p>Removes the “Get the app to keep using Reddit” bottom sheet and the fog overlay behind it.</p>
+                </div>
+            </div>
+
+            <div class="card">
+                <span class="glyph" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="22" height="22"><rect x="6" y="2.5" width="12" height="19" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><rect x="8.5" y="15" width="7" height="3.5" rx="1.2" fill="currentColor"/><path d="M2.5 2.5l19 19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                </span>
+                <div>
+                    <h3>X’s “Open X App” banner too</h3>
+                    <p>Clears the bottom banner and the top-bar pill, and stops Reply, Like and Repost taps from bouncing you to the App Store.</p>
+                </div>
+            </div>
+
+            <div class="card">
+                <span class="glyph" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 4v16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M7 15l5 5 5-5M7 9l5-5 5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </span>
+                <div>
+                    <h3>Scrolling actually works</h3>
+                    <p>Releases the scroll lock those nags leave on the page — hiding the sheet alone would leave it frozen.</p>
+                </div>
+            </div>
+
+            <div class="card">
+                <span class="glyph" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="22" height="22"><path d="M20 12a8 8 0 1 1-2.3-5.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M20 3v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </span>
+                <div>
+                    <h3>Self-healing</h3>
+                    <p>The nags load late and come back. It keeps watching the page and clears them again, without a reload.</p>
+                </div>
+            </div>
+
+            <div class="card">
+                <span class="glyph" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 3l7 3v6c0 4.4-3 7.9-7 9-4-1.1-7-4.6-7-9V6z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M9 12l2 2 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </span>
+                <div>
+                    <h3>Nothing leaves your device</h3>
+                    <p>No account, no tracking, no servers. It runs only on reddit.com, x.com and twitter.com, and nowhere else.</p>
+                </div>
+            </div>
+        </section>
+
+        <section class="setup" aria-label="Turn it on">
+            <h2>Turn it on</h2>
+
+            <ol class="platform-ios-only">
+                <li>Open <b>Settings ▸ Apps ▸ Safari ▸ Extensions</b>.</li>
+                <li>Tap <b>Keep Scrolling</b> and switch it on.</li>
+                <li>Set <b>reddit.com</b>, <b>x.com</b> and <b>twitter.com</b> to <b>Allow Always</b>, so Safari stops asking on every visit.</li>
+            </ol>
+
+            <ol class="platform-mac-only">
+                <li>Open <b>Safari ▸ Settings ▸ Extensions</b>.</li>
+                <li>Tick <b>Keep Scrolling</b>.</li>
+                <li>Give it access to <b>reddit.com</b>, <b>x.com</b> and <b>twitter.com</b> on every website.</li>
+            </ol>
+
+            <button class="open-preferences platform-mac-only" type="button">Quit and Open Safari Settings…</button>
+
+            <p class="note">Then just browse. There is nothing to configure here — this screen is the whole app.</p>
+        </section>
+
+        <footer>
+            <p class="version" id="version">__APP_VERSION__</p>
+        </footer>
+    </main>
+</body>
+</html>

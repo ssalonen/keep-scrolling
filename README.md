@@ -17,7 +17,11 @@ Releases are signed and uploaded to **TestFlight**. Accept the tester invite,
 install **Keep Scrolling** from the TestFlight app, then:
 
 > **Settings ▸ Apps ▸ Safari ▸ Extensions ▸ Keep Scrolling** → enable, and set
-> reddit.com to **Allow** (Allow Always avoids the per-visit prompt).
+> reddit.com, x.com and twitter.com to **Allow** (Allow Always avoids the
+> per-visit prompt).
+
+The app's own screen repeats these steps alongside a short overview of what it
+does — there is nothing to configure in it.
 
 > **Note:** Shreddit previously shipped as an unsigned IPA installed through
 > SideStore/AltStore. That path is gone — the `altstore-source.json` source URL
@@ -46,6 +50,9 @@ full diagnosis and references.
 ## Development & releases
 
 - `extension/` — the MV3 web extension (the whole product).
+- `app/` — the container app's screen: a short overview of what the extension
+  does plus the enable steps. Copied over the converter's placeholder page at
+  build time by `apply_app_ui` in the Fastfile.
 - `test/extension.test.js` — `node:test` invariant guards; run with `node --test`.
 - `fastlane/` — signing (`match`) and release lanes; see
   [`docs/FASTLANE-MIGRATION.md`](docs/FASTLANE-MIGRATION.md).

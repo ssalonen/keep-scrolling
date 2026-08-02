@@ -134,6 +134,22 @@ it has to fix four things the converter gets wrong or leaves unset:
    written into the `Info.plist` file, for the same reason as the display name
    below.
 
+5. **The container app's UI.** The converter's app template is a single line of
+   placeholder text ("You can turn on … in Settings") — and that page *is* the
+   whole app the user sees on the home screen. `apply_app_ui` overwrites the
+   template's `Main.html` / `Style.css` / `Script.js` with the ones tracked in
+   `app/` (a feature overview + the enable steps) and substitutes the build's
+   version into the footer.
+
+   It overwrites **in place**, never adds files: the generated project's file
+   references and Copy-Bundle-Resources phase already point at those three
+   paths, so nothing has to be registered with `xcodeproj`. A fourth file would
+   be copied and then silently *not* bundled — hence the three-file limit, which
+   `apply_app_ui` enforces by erroring if a listed file is missing on either
+   side. It also locates the resources directory by globbing for the template's
+   `Main.html` rather than hard-coding `Shared (App)/Resources`, since that path
+   has moved between converter versions.
+
 Patching a generated project is safe **because it is a build artifact** under
 `build/gen`, regenerated from scratch every run. This is the opposite of the bug
 that broke every-byte-counts, where XcodeGen was writing over *tracked*
@@ -158,12 +174,17 @@ against the inputs that produced it:
    until a human notices
 5. `block-reddit-nag.js`, `block-x-nag.js`, and `manifest.json` are actually
    inside the appex
+6. the container app bundles **our** `Main.html` (plus `Style.css` /
+   `Script.js`), with the build's version stamped in and no leftover
+   `__APP_VERSION__` placeholder
 
 (5) is the one that matters most: a correctly signed, correctly versioned IPA
 containing **no extension code** would sail through to TestFlight and simply do
-nothing on device. This is the reference repo's central lesson — *a check whose
-expectation comes from the same source as the thing being checked is not a
-check* — so all five read the shipped artifact.
+nothing on device. (6) is the same failure mode one level down: if the converter
+moves its app template, `apply_app_ui`'s copy lands somewhere unbundled and the
+app quietly ships Apple's placeholder line instead. This is the reference repo's
+central lesson — *a check whose expectation comes from the same source as the
+thing being checked is not a check* — so all six read the shipped artifact.
 
 ## Secrets
 
