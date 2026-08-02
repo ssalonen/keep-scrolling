@@ -14,8 +14,9 @@ extension/
   block-x-nag.js           <- X/Twitter content script (independent, see x-nag-remover-plan.md)
   icon-48.png / icon-96.png / icon-128.png
 app/
-  Main.html / Style.css / Script.js  <- container-app UI, copied over the converter's
-                                        placeholder page by apply_app_ui (Fastfile)
+  Main.html                <- container-app UI (self-contained: inline CSS/JS/icon),
+                              copied over the converter's placeholder page by
+                              apply_app_ui (Fastfile)
 .github/workflows/
   ci.yml                   <- lint + invariant tests + auto-release on green main
   release.yml              <- sign with match + upload to TestFlight + GitHub Release
@@ -40,7 +41,7 @@ reddit.com in Safari settings.
 ## Build & distribution (CI → TestFlight)
 This repo does **not** commit an Xcode project. `fastlane`'s `beta` lane
 generates one at build time on a macOS runner with Apple's converter, signs it
-with `match`, and uploads to TestFlight. Full detail — including the three things
+with `match`, and uploads to TestFlight. Full detail — including the five things
 the converter gets wrong and the one-time manual setup — is in
 [`FASTLANE-MIGRATION.md`](FASTLANE-MIGRATION.md).
 
@@ -49,8 +50,8 @@ the converter gets wrong and the one-time manual setup — is in
 2. The Fastfile patches the generated project: forces both bundle IDs
    (`fi.mailhub.keepscrolling` + `.Extension`), repoints the `Info.plist` version
    keys at `$(MARKETING_VERSION)` / `$(CURRENT_PROJECT_VERSION)`, and replaces the
-   converter's placeholder container-app page with `app/` (feature overview +
-   enable steps, version stamped in).
+   converter's placeholder container-app page with `app/Main.html` (feature
+   overview + enable steps, version stamped in).
 3. `match` syncs the Apple Distribution cert + both App Store profiles; manual
    signing is stamped onto each target.
 4. `gym` archives and exports a signed `app-store` IPA; `verify_ipa` asserts the

@@ -13,9 +13,10 @@ const script = readFileSync(join(root, 'extension', 'block-reddit-nag.js'), 'utf
 const scriptX = readFileSync(join(root, 'extension', 'block-x-nag.js'), 'utf8');
 const manifest = JSON.parse(readFileSync(join(root, 'extension', 'manifest.json'), 'utf8'));
 const appHtml = readFileSync(join(root, 'app', 'Main.html'), 'utf8');
-const appCss = readFileSync(join(root, 'app', 'Style.css'), 'utf8');
-const appScript = readFileSync(join(root, 'app', 'Script.js'), 'utf8');
 const fastfile = readFileSync(join(root, 'fastlane', 'Fastfile'), 'utf8');
+// The page is one self-contained file; pull its inline script out for checks
+// that need the JS on its own.
+const appScript = (appHtml.match(/<script>([\s\S]*?)<\/script>/) || [, ''])[1];
 
 test('content script is syntactically valid', () => {
   // Throws on a syntax error; `new Function` never executes the body.
@@ -165,7 +166,8 @@ test('manifest icons exist on disk', () => {
 // with the Fastfile that copies it and the Swift host that drives it.
 
 test('app UI keeps the template contract the Swift host calls into', () => {
-  assert.doesNotThrow(() => new Function(appScript), 'Script.js must be syntactically valid');
+  assert.ok(appScript.trim(), 'Main.html must carry its host glue in an inline <script>');
+  assert.doesNotThrow(() => new Function(appScript), 'the inline script must be syntactically valid');
   assert.ok(
     /function show\(platform, enabled, useSettingsInsteadOfPreferences\)/.test(appScript),
     'the ViewController calls a global show(platform, enabled, useSettingsInsteadOfPreferences)',
@@ -177,13 +179,20 @@ test('app UI keeps the template contract the Swift host calls into', () => {
 });
 
 test('app UI loads nothing from the network (offline WKWebView + the privacy claim it makes)', () => {
-  for (const [name, source] of [['Main.html', appHtml], ['Style.css', appCss], ['Script.js', appScript]]) {
-    assert.ok(!/https?:\/\//.test(source), `${name} must not reference a remote URL`);
-  }
-  // Every referenced asset is a bare filename bundled next to the page.
+  assert.ok(!/https?:\/\//.test(appHtml), 'Main.html must not reference a remote URL');
+});
+
+test('app UI is one self-contained file with no sibling assets', () => {
+  // The converter localizes Main.html into Base.lproj/ while plain resources
+  // land at the .app root, so a relative reference to a sibling file does not
+  // resolve at runtime — and the template ships no Script.js to overwrite.
+  // Both facts broke a release; inline everything instead.
   for (const [, ref] of appHtml.matchAll(/(?:src|href)="([^"]+)"/g)) {
-    assert.ok(!ref.includes('/'), `app UI asset must be a sibling file, got: ${ref}`);
+    assert.ok(ref.startsWith('data:'), `app UI must inline its assets, got a reference to: ${ref}`);
   }
+  assert.ok(!/<link\b/.test(appHtml), 'no external stylesheet — the CSS is inline');
+  assert.ok(!/<script[^>]+\bsrc=/.test(appHtml), 'no external script — the JS is inline');
+  assert.ok(/<style>/.test(appHtml) && /<script>/.test(appHtml), 'CSS and JS must be inline in the page');
 });
 
 test('app UI overview names every site the extension actually runs on', () => {
@@ -198,15 +207,27 @@ test('app UI overview names every site the extension actually runs on', () => {
 });
 
 test('app UI matches what the Fastfile copies and verify_ipa greps for', () => {
-  // apply_app_ui overwrites the template's filenames in place; a file listed
+  // apply_app_ui overwrites the template's filename in place; a file listed
   // here but absent from app/ (or vice versa) fails the build on a Mac only,
   // long after CI went green.
   const listed = fastfile.match(/APP_UI_FILES = \[(.*?)\]/)[1].match(/"([^"]+)"/g).map((s) => s.slice(1, -1));
-  assert.deepEqual(listed, ['Main.html', 'Style.css', 'Script.js']);
+  assert.deepEqual(listed, ['Main.html'], 'the page is one self-contained file — see the Fastfile comment');
 
   const token = fastfile.match(/APP_UI_VERSION_TOKEN = "([^"]+)"/)[1];
-  assert.ok(appHtml.includes(token), `Main.html must contain ${token} for the version substitution`);
-  assert.ok(appScript.includes(token), 'Script.js must drop the footer if the token survived into a build');
+  assert.equal(
+    (appHtml.match(new RegExp(token, 'g')) || []).length,
+    1,
+    `${token} must appear EXACTLY once (the footer). apply_app_ui gsubs every occurrence, so a ` +
+      'second one — e.g. inside the inline script — gets rewritten too and silently changes behaviour',
+  );
+  // The script's "was it substituted?" guard therefore keys on the shape of the
+  // replacement, not on the token.
+  const replacement = fastfile.match(/gsub\(APP_UI_VERSION_TOKEN, "([^"#]*)/)[1];
+  assert.ok(replacement.startsWith('Version '), 'the substituted footer text must start with "Version "');
+  assert.ok(
+    /\/\^Version\\s\//.test(appScript),
+    'the inline script must detect an unsubstituted footer by shape (/^Version\\s/), not by the token',
+  );
 
   const marker = fastfile.match(/APP_UI_MARKER = '([^']+)'/)[1];
   assert.ok(appHtml.includes(marker), `verify_ipa greps the shipped Main.html for ${marker}`);
@@ -216,6 +237,10 @@ test('app UI keeps the enable instructions, the one thing a user must act on', (
   assert.ok(/Extensions/.test(appHtml), 'must tell the user where Safari lists extensions');
   assert.ok(/Allow Always/.test(appHtml), 'must mention Allow Always — otherwise Safari prompts every visit');
   for (const cls of ['platform-ios-only', 'platform-mac-only']) {
-    assert.ok(appHtml.includes(cls) && appCss.includes(cls), `missing platform switching for ${cls}`);
+    // Once in the markup, once in the inline CSS that hides/shows it.
+    assert.ok(
+      (appHtml.match(new RegExp(cls, 'g')) || []).length >= 2,
+      `missing platform switching for ${cls}`,
+    );
   }
 });

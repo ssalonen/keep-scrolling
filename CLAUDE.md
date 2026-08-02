@@ -27,8 +27,8 @@ the independent `extension/block-x-nag.js`. Full background and references:
   of the Reddit script — see the "X/Twitter nag" section below.
 - `extension/manifest.json` — MV3 manifest declaring both content scripts.
 - `extension/icon-{48,96,128}.png` — extension icons.
-- `app/{Main.html,Style.css,Script.js}` — the container app's UI (feature
-  overview + enable steps). Copied over the converter's placeholder page by
+- `app/Main.html` — the container app's UI (feature overview + enable steps),
+  one self-contained file. Copied over the converter's placeholder page by
   `apply_app_ui` in the Fastfile — see "Container app UI" below.
 - `.github/workflows/` — CI/CD (see below).
 - `fastlane/` — `Fastfile` (lanes: `certificates`, `build`, `beta`), `Appfile`,
@@ -142,20 +142,25 @@ feature overview and the enable steps, in the same no-dependency spirit as the
 content scripts: system fonts, inline SVG glyphs, light + dark, safe-area
 insets, **zero network requests**.
 
-- `apply_app_ui` (Fastfile) copies the three files over the generated app's
-  resources and substitutes `__APP_VERSION__` in `Main.html` with the build's
-  version. `verify_ipa` then asserts the shipped `.app` really contains our page
-  at the right version — a converter template move would otherwise silently
-  re-ship Apple's placeholder.
-- IMPORTANT: overwrite the template's `Main.html` / `Style.css` / `Script.js`
-  **in place**; do not add files. The generated project already references
-  exactly those three paths, so anything new would be copied but never bundled
-  unless it is also registered with `xcodeproj`.
-- IMPORTANT: the three are NOT in one directory. The converter localizes the
-  page: `Main.html` lands in `<App>/Resources/Base.lproj/`, `Style.css` and
-  `Script.js` in `<App>/Resources/`. `apply_app_ui` therefore globs for each
-  file by name — never assume a shared parent (that assumption failed the
-  v0.5.0 release).
+- `apply_app_ui` (Fastfile) copies `app/Main.html` over the generated app's own
+  `Main.html` and substitutes `__APP_VERSION__` with the build's version.
+  `verify_ipa` then asserts the shipped `.app` really contains our page at the
+  right version — a converter template move would otherwise silently re-ship
+  Apple's placeholder.
+- IMPORTANT: overwrite the template's `Main.html` **in place**; do not add
+  files. The generated project references exactly that path, so anything new
+  would be copied but never bundled unless registered with `xcodeproj`.
+- IMPORTANT: keep the page **one self-contained file** — CSS, JS and the icon
+  all inline. Two release failures came from assuming otherwise: the template
+  ships no `Script.js` at all (v0.5.1), and it localizes the page into
+  `<App>/Resources/Base.lproj/` while plain resources land at the `.app` root,
+  so relative references to siblings do not resolve at runtime (v0.5.0 was the
+  same directory assumption). `apply_app_ui` globs per filename for the same
+  reason — never hard-code the layout.
+- IMPORTANT: `__APP_VERSION__` must appear **exactly once** in the page.
+  `apply_app_ui` gsubs every occurrence, so a second one (e.g. inside the
+  inline script) is rewritten too — that is why the script detects an
+  unsubstituted footer by shape (`/^Version\s/`) rather than by the token.
 - Keep the two host contracts from Apple's template: a global
   `show(platform, enabled, useSettingsInsteadOfPreferences)` (the ViewController
   calls it via `evaluateJavaScript`) and the `"open-preferences"` message to

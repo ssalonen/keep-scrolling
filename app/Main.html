@@ -5,16 +5,254 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="color-scheme" content="light dark">
     <title>Keep Scrolling</title>
-    <link rel="stylesheet" href="Style.css">
-    <script type="text/javascript" src="Script.js"></script>
+
+    <!-- SELF-CONTAINED ON PURPOSE — do not split the CSS/JS/icon back out into
+         sibling files. The converter's app template ships only Main.html and
+         Style.css (no Script.js at all), and it localizes the page: Main.html
+         is bundled into Base.lproj/ while plain resources land at the .app
+         root, so a relative href to a sibling file does not resolve at
+         runtime. One file has no such dependency, and apply_app_ui then has
+         exactly one destination to find. Everything is inline and local: no
+         network requests, no external fonts, no analytics. -->
+    <style>
+    :root {
+        color-scheme: light dark;
+
+        --bg: #f2f2f7;
+        --bg-elevated: #ffffff;
+        --text: #1c1c1e;
+        --text-dim: #6c6c70;
+        --accent: #ff5722;
+        --accent-soft: rgba(255, 87, 34, 0.12);
+        --radius: 14px;
+    }
+
+    @media (prefers-color-scheme: dark) {
+        :root {
+            --bg: #000000;
+            --bg-elevated: #1c1c1e;
+            --text: #f2f2f7;
+            --text-dim: #98989f;
+            --accent: #ff7043;
+            --accent-soft: rgba(255, 112, 67, 0.18);
+        }
+    }
+
+    * {
+        box-sizing: border-box;
+    }
+
+    body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+        font-size: 17px;
+        line-height: 1.45;
+        -webkit-text-size-adjust: 100%;
+        -webkit-font-smoothing: antialiased;
+    }
+
+    main {
+        max-width: 640px;
+        margin: 0 auto;
+        /* viewport-fit=cover + safe-area padding: content clears the notch, the
+           home indicator, and the rounded corners in landscape. */
+        padding:
+            calc(env(safe-area-inset-top) + 32px)
+            calc(env(safe-area-inset-right) + 20px)
+            calc(env(safe-area-inset-bottom) + 40px)
+            calc(env(safe-area-inset-left) + 20px);
+    }
+
+    /* ── Hero ──────────────────────────────────────────────────────────── */
+
+    .hero {
+        text-align: center;
+        margin-bottom: 22px;
+    }
+
+    .app-icon {
+        width: 96px;
+        height: 96px;
+        border-radius: 22px;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+    }
+
+    h1 {
+        margin: 16px 0 4px;
+        font-size: 30px;
+        line-height: 1.15;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+    }
+
+    .tagline {
+        margin: 0;
+        color: var(--text-dim);
+        font-size: 16px;
+        text-wrap: balance;
+    }
+
+    .status {
+        display: block;
+        width: fit-content;
+        margin: 0 auto 30px;
+        padding: 5px 14px;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: var(--accent);
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+    }
+
+    /* ── Section headings ──────────────────────────────────────────────── */
+
+    h2 {
+        margin: 0 0 10px 4px;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--text-dim);
+    }
+
+    /* ── Feature cards ─────────────────────────────────────────────────── */
+
+    .features {
+        margin-bottom: 34px;
+    }
+
+    .card {
+        display: flex;
+        gap: 14px;
+        align-items: flex-start;
+        padding: 16px;
+        margin-bottom: 10px;
+        background: var(--bg-elevated);
+        border-radius: var(--radius);
+    }
+
+    .glyph {
+        flex: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 38px;
+        height: 38px;
+        border-radius: 11px;
+        background: var(--accent-soft);
+        color: var(--accent);
+    }
+
+    .card h3 {
+        margin: 1px 0 3px;
+        font-size: 16px;
+        font-weight: 600;
+        line-height: 1.3;
+    }
+
+    .card p {
+        margin: 0;
+        font-size: 15px;
+        color: var(--text-dim);
+        text-wrap: pretty;
+    }
+
+    /* ── Setup steps ───────────────────────────────────────────────────── */
+
+    .setup ol {
+        margin: 0;
+        padding: 6px 16px 16px 38px;
+        background: var(--bg-elevated);
+        border-radius: var(--radius);
+        font-size: 15px;
+    }
+
+    .setup li {
+        margin: 10px 0;
+        padding-left: 2px;
+    }
+
+    .setup li::marker {
+        color: var(--accent);
+        font-weight: 600;
+    }
+
+    .setup b {
+        color: var(--text);
+        font-weight: 600;
+    }
+
+    .note {
+        margin: 14px 4px 0;
+        font-size: 13px;
+        color: var(--text-dim);
+    }
+
+    button.open-preferences {
+        margin-top: 14px;
+        width: 100%;
+        padding: 13px 18px;
+        border: 0;
+        border-radius: 12px;
+        background: var(--accent);
+        color: #fff;
+        font-family: inherit;
+        font-size: 16px;
+        font-weight: 600;
+        cursor: pointer;
+        -webkit-appearance: none;
+    }
+
+    button.open-preferences:active {
+        filter: brightness(0.92);
+    }
+
+    /* ── Platform switching ──────────────────────────────────────────────
+       show() stamps `platform-ios` / `platform-mac` on <body>. iOS wording is
+       the default so the page is still complete if the host never calls
+       show() (e.g. opening Main.html directly while iterating on design). */
+
+    .platform-mac-only {
+        display: none;
+    }
+
+    body.platform-mac ol.platform-mac-only {
+        display: block;
+    }
+
+    body.platform-mac button.platform-mac-only {
+        display: block;
+    }
+
+    body.platform-mac .platform-ios-only {
+        display: none;
+    }
+
+    /* ── Footer ────────────────────────────────────────────────────────── */
+
+    footer {
+        margin-top: 28px;
+        text-align: center;
+    }
+
+    .version {
+        margin: 0;
+        font-size: 12px;
+        color: var(--text-dim);
+    }
+    </style>
 </head>
 <body>
-    <!-- Rendered inside the container app's WKWebView. Everything is local: no
-         network requests, no external fonts, no analytics. `show()` in
-         Script.js adds the platform-* / state-* classes the CSS keys off. -->
     <main>
         <header class="hero">
-            <img class="app-icon" src="Icon.png" width="96" height="96" alt="" onerror="this.remove()">
+            <!-- Inlined as a data URI rather than referencing the template's
+                 Icon.png, which sits at the .app root while this page is
+                 bundled under Base.lproj/. -->
+            <img class="app-icon" width="96" height="96" alt=""
+                 src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAYAAADDPmHLAAAEXUlEQVR42u2d3bGbMBBGKcElUAIl8JIC0gGPeaQEOnAJlOISaCAzlKCHFEAgkTP33thjhLVC2j07s482NudDP58WqaoIgiAIwlYs36r2Y3JH9MHt1xzWvPl0ay4703343OC/C5FkCrtes1tzXHMKgHw0J3+t7Zo1BM6B3qx5XXNOAPxVzv63NJCxAx0xJATfJWraJbqKDoLHoF/84MsVCP7RgHL7LxfI2gKPEALh90rBPxJCD/HPc/bZAPhHA8bWenM/GgT/NUdz3YJ/6h3wP3ULrRX4V4A/zat2y3YC8i7/oNYGv6HJD+4SGi3wO4Aezq50+D0Q386+VPhM8SJOFYFPjsAnR/p8sme0T3a5wW+A8iW/X5blRyN5jSYX+DUmzwP4P6dl+eUkReCycAyxd5/Av4esCCYWdnKGn0YE17Pgt0DfAT+NCNrU8C/0+wHw5UXgkhaVYPYcgC8vgpGmP3f48iJoUwhgBv4b8GVFMGP1lgBfVgQ9A78S4MuJQGZA6N9qAX5M+HIiGHj6S4EvI4K4rYD5p18avowIhpgCcMBPFPFE4FjnLw1+fBF0MQQwAT9xbNfdrn/2aqHZQg8d8N8vHDG53KsL/nvLxeZsX33wj9vD5pp/nfCPdwOmmn/d8I91A2aaf/3ww7sBX+kLfB3w71lj/tiFH2YKqS/5sgc/rGRMtftnE36YKwh8dfD/pO2iT+PwdxeNqqz7A/7+ekF1xR/ADysS8efkAF8f/C1vdgQA/MMCcMBXCX9fmRjw1cLfNxUEvl74ugUA/PcFUKwJBPw4ZlCRAgC+YQEA37AAgC+zHgB81fAVzAKAb1gAwE8iAAd8nfD3WsE34KuEX+hqIPCTC2AAvkr4uwtCeuCrhL+7JKwFvkr4+3cSBb7Osvj8XwwBfjYvhozAV5djvi+HAj+7l0Nr4KvLsAOmkmwQAfxUGb5PkPgWMcBPmYe2iGmAryaP7RUo0g0AP//mX6wbAH4Zzb9INwD8spr/qK4g8PN3/0RNoW3r820LdODna/6Il4mlFgHw4xwYEbVIJJUIgL+v+OOUQ6OkRQD8ZZE4Oi5qqZiUCIAf/+kXOzoutgiAL/f0i9ULxhIB8MPq/rI6PPpdEQA/ju176vHxR0UA/GNFnxFEMJ4uAuAfL/nK9izhvSIAfrqBX/L3B16JAPjnNf3JqoaeiQD4cZd7I4lgSiIC4Mus9kUQQC22p8BdBMB/1u/XVQ4hWj+4iQD48Qs9BETQAaWwdf7srWIyvdWbpUlEpjd7EAHwEQHwGRPQ5zM7YLQfySdwAA0yeZpKU3jHcALua3s3G4evqAUkFnaKEkFLl/Bfk99WlsIXlTBV/HsPLpXV8K3BbBD8bO6p3+EZOCPNfQ/x593CoFQIzv+3C6RtCQHwEZzEqdD5fAfBuG7iNfMB4+x/YwMxO2IAegYWc+fn01Oipn3016whkK+30PvB182nCxy43T83+O9izq5QJP+SO0IQBEEYi99BPgf/zWvHFQAAAABJRU5ErkJggg==">
             <h1>Keep Scrolling</h1>
             <p class="tagline">Reddit and X, minus the “get the app” nags.</p>
         </header>
@@ -102,5 +340,62 @@
             <p class="version" id="version">__APP_VERSION__</p>
         </footer>
     </main>
+
+    <!-- Host glue. Two contracts with the generated Swift host, both from
+         Apple's template — keep them:
+
+           1. a GLOBAL show(platform, enabled, useSettingsInsteadOfPreferences),
+              which the ViewController calls via evaluateJavaScript once the web
+              view finishes loading (iOS passes only the platform; macOS also
+              passes the extension's enabled state);
+           2. webkit.messageHandlers.controller.postMessage("open-preferences"),
+              which the macOS host answers by opening Safari's extension
+              settings. iOS has no such affordance, so that button is
+              macOS-only.
+
+         Everything is defensive: a missing element must never throw, because an
+         exception in show() would leave the page stuck in its default state. -->
+    <script>
+    function show(platform, enabled, useSettingsInsteadOfPreferences) {
+        document.body.classList.add(`platform-${platform}`);
+
+        const status = document.getElementById('status');
+        if (status && typeof enabled === 'boolean') {
+            status.textContent = enabled ? 'Extension is on' : 'Extension is off';
+        }
+
+        if (useSettingsInsteadOfPreferences) {
+            const button = document.querySelector('button.open-preferences');
+            if (button) {
+                button.textContent = 'Quit and Open Safari Settings…';
+            }
+        }
+    }
+
+    function openPreferences() {
+        webkit.messageHandlers.controller.postMessage('open-preferences');
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        const button = document.querySelector('button.open-preferences');
+        if (button) {
+            button.addEventListener('click', openPreferences);
+        }
+
+        // The Fastfile substitutes the real version in at build time. If the
+        // placeholder survived (someone opened the file directly, or the
+        // substitution was skipped), show nothing rather than a raw token.
+        //
+        // Match on what a substituted version looks like — deliberately NOT on
+        // the placeholder token itself. The substitution rewrites *every*
+        // occurrence in this file, so a literal token here would be rewritten
+        // too, the test would match its own replacement, and the footer would
+        // be deleted on every build.
+        const version = document.getElementById('version');
+        if (version && !/^Version\s/.test(version.textContent.trim())) {
+            version.remove();
+        }
+    });
+    </script>
 </body>
 </html>

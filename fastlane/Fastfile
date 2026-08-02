@@ -44,10 +44,15 @@ GEN_DIR       = File.join(BUILD_DIR, "gen")
 # The files that are the actual product — verified present in the shipped IPA.
 CONTENT_SCRIPTS = ["block-reddit-nag.js", "block-x-nag.js"]
 
-# The container app's web resources. These filenames are the template's, and
-# they are overwritten in place (never added) so the generated project's
-# existing file references and Copy-Bundle-Resources phase keep working.
-APP_UI_FILES = ["Main.html", "Style.css", "Script.js"]
+# The container app's web resources. This filename is the template's, and it is
+# overwritten in place (never added) so the generated project's existing file
+# reference and Copy-Bundle-Resources phase keep working.
+#
+# Main.html ONLY, deliberately: app/Main.html inlines its own CSS, JS and icon.
+# The template ships no Script.js to overwrite, and it localizes the page into
+# Base.lproj/ while plain resources land at the .app root — so a page split
+# across sibling files could not reference them at runtime anyway.
+APP_UI_FILES = ["Main.html"]
 # Substituted into Main.html at build time; Script.js drops the element if this
 # ever survives into a build.
 APP_UI_VERSION_TOKEN = "__APP_VERSION__"
@@ -235,19 +240,19 @@ end
 # the only thing a user ever sees of this app besides Safari's toggle. app/
 # replaces it with the feature overview + enable steps.
 #
-# It overwrites the template's three filenames in place instead of adding files,
-# so the generated project needs no modification: the file references and the
+# It overwrites the template's own filename in place instead of adding files,
+# so the generated project needs no modification: the file reference and the
 # Copy Bundle Resources phase the converter already emitted keep pointing at
-# exactly these paths. Anything more (extra assets, renamed files) would have to
+# exactly this path. Anything more (extra assets, renamed files) would have to
 # be registered with xcodeproj as well, and would silently ship missing
-# otherwise — hence the deliberate three-file limit.
+# otherwise — which is why app/Main.html carries its CSS, JS and icon inline
+# rather than as siblings.
 def apply_app_ui(marketing_version, build_number)
-  # Resolve each file's destination SEPARATELY. The three do not live in one
-  # directory: the converter localizes the page, so Main.html is at
-  # Resources/Base.lproj/Main.html while Style.css and Script.js sit in
-  # Resources/ above it. Assuming Main.html's own directory held all three is
-  # what failed the v0.5.0 release. Globbing per file also keeps this working if
-  # the template rearranges again — the layout is not hard-coded anywhere.
+  # Resolve each file by globbing for its own name, never by deriving a shared
+  # directory: the converter localizes the page into Resources/Base.lproj/ while
+  # other resources sit in Resources/ above it, and it ships no Script.js at
+  # all. Assuming one directory held all three failed the v0.5.0 release, and
+  # assuming the template's file set matched ours failed v0.5.1.
   dests = {}
   APP_UI_FILES.each do |name|
     src = File.join(APP_UI_DIR, name)
@@ -445,9 +450,9 @@ def verify_ipa(ipa, marketing_version, build_number)
     grep -q '#{APP_UI_MARKER}' "$MAIN_HTML" || { echo "::error::the bundled Main.html is not the app/ overview page (missing '#{APP_UI_MARKER}') — the app would show the converter's placeholder text"; exit 1; }
     grep -q '#{APP_UI_VERSION_TOKEN}' "$MAIN_HTML" && { echo "::error::the bundled Main.html still contains the raw #{APP_UI_VERSION_TOKEN} placeholder"; exit 1; }
     grep -q 'Version #{marketing_version} (#{build_number})' "$MAIN_HTML" || { echo "::error::the bundled Main.html does not show version #{marketing_version} (#{build_number})"; exit 1; }
-    for f in #{APP_UI_FILES.map { |s| "\"#{s}\"" }.join(" ")}; do
-      [ -n "$(find "$APP" -name "$f" -print -quit)" ] || { echo "::error::$f is missing from $(basename "$APP") — the overview page would render unstyled or without its platform logic."; exit 1; }
-    done
+    # The page carries its own CSS/JS/icon, so Main.html being present, ours,
+    # and correctly versioned is the whole check — there are no sibling assets
+    # that could go missing independently.
 
     echo "OK: IPA ships '#{APP_DISPLAY_NAME}' (#{APP_ID} + #{EXT_ID}) at #{marketing_version} (#{build_number}) with the content scripts and the app overview UI"
   BASH
