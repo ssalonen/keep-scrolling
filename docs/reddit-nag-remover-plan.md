@@ -13,6 +13,9 @@ extension/
   block-reddit-nag.js      <- Reddit content script
   block-x-nag.js           <- X/Twitter content script (independent, see x-nag-remover-plan.md)
   icon-48.png / icon-96.png / icon-128.png
+app/
+  Main.html / Style.css / Script.js  <- container-app UI, copied over the converter's
+                                        placeholder page by apply_app_ui (Fastfile)
 .github/workflows/
   ci.yml                   <- lint + invariant tests + auto-release on green main
   release.yml              <- sign with match + upload to TestFlight + GitHub Release
@@ -44,8 +47,10 @@ the converter gets wrong and the one-time manual setup — is in
 1. `xcrun safari-web-extension-converter extension --ios-only ...` generates the
    container App + Web Extension appex targets into `build/gen`.
 2. The Fastfile patches the generated project: forces both bundle IDs
-   (`fi.mailhub.keepscrolling` + `.Extension`) and repoints the `Info.plist` version
-   keys at `$(MARKETING_VERSION)` / `$(CURRENT_PROJECT_VERSION)`.
+   (`fi.mailhub.keepscrolling` + `.Extension`), repoints the `Info.plist` version
+   keys at `$(MARKETING_VERSION)` / `$(CURRENT_PROJECT_VERSION)`, and replaces the
+   converter's placeholder container-app page with `app/` (feature overview +
+   enable steps, version stamped in).
 3. `match` syncs the Apple Distribution cert + both App Store profiles; manual
    signing is stamped onto each target.
 4. `gym` archives and exports a signed `app-store` IPA; `verify_ipa` asserts the

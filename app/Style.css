@@ -1,0 +1,236 @@
+/* Container-app UI. Deliberately dependency-free: system fonts, no webfonts,
+   no images beyond the bundled Icon.png, so the view renders instantly offline
+   inside WKWebView. Light + dark are both first-class (the app follows the
+   system appearance and there is no in-app toggle). */
+
+:root {
+    color-scheme: light dark;
+
+    --bg: #f2f2f7;
+    --bg-elevated: #ffffff;
+    --text: #1c1c1e;
+    --text-dim: #6c6c70;
+    --hairline: rgba(60, 60, 67, 0.12);
+    --accent: #ff5722;
+    --accent-soft: rgba(255, 87, 34, 0.12);
+    --radius: 14px;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #000000;
+        --bg-elevated: #1c1c1e;
+        --text: #f2f2f7;
+        --text-dim: #98989f;
+        --hairline: rgba(84, 84, 88, 0.5);
+        --accent: #ff7043;
+        --accent-soft: rgba(255, 112, 67, 0.18);
+    }
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: -apple-system-body;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    font-size: 17px;
+    line-height: 1.45;
+    -webkit-text-size-adjust: 100%;
+    -webkit-font-smoothing: antialiased;
+}
+
+main {
+    max-width: 640px;
+    margin: 0 auto;
+    /* viewport-fit=cover + safe-area padding: content clears the notch, the
+       home indicator, and the rounded corners in landscape. */
+    padding:
+        calc(env(safe-area-inset-top) + 32px)
+        calc(env(safe-area-inset-right) + 20px)
+        calc(env(safe-area-inset-bottom) + 40px)
+        calc(env(safe-area-inset-left) + 20px);
+}
+
+/* ── Hero ──────────────────────────────────────────────────────────────── */
+
+.hero {
+    text-align: center;
+    margin-bottom: 22px;
+}
+
+.app-icon {
+    width: 96px;
+    height: 96px;
+    border-radius: 22px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+}
+
+h1 {
+    margin: 16px 0 4px;
+    font-size: 30px;
+    line-height: 1.15;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+}
+
+.tagline {
+    margin: 0;
+    color: var(--text-dim);
+    font-size: 16px;
+    text-wrap: balance;
+}
+
+.status {
+    display: block;
+    width: fit-content;
+    margin: 0 auto 30px;
+    padding: 5px 14px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+}
+
+/* ── Section headings ──────────────────────────────────────────────────── */
+
+h2 {
+    margin: 0 0 10px 4px;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+}
+
+/* ── Feature cards ─────────────────────────────────────────────────────── */
+
+.features {
+    margin-bottom: 34px;
+}
+
+.card {
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+    padding: 16px;
+    margin-bottom: 10px;
+    background: var(--bg-elevated);
+    border-radius: var(--radius);
+}
+
+.glyph {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 38px;
+    border-radius: 11px;
+    background: var(--accent-soft);
+    color: var(--accent);
+}
+
+.card h3 {
+    margin: 1px 0 3px;
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 1.3;
+}
+
+.card p {
+    margin: 0;
+    font-size: 15px;
+    color: var(--text-dim);
+    text-wrap: pretty;
+}
+
+/* ── Setup steps ───────────────────────────────────────────────────────── */
+
+.setup ol {
+    margin: 0;
+    padding: 6px 16px 16px 38px;
+    background: var(--bg-elevated);
+    border-radius: var(--radius);
+    font-size: 15px;
+}
+
+.setup li {
+    margin: 10px 0;
+    padding-left: 2px;
+}
+
+.setup li::marker {
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.setup b {
+    color: var(--text);
+    font-weight: 600;
+}
+
+.note {
+    margin: 14px 4px 0;
+    font-size: 13px;
+    color: var(--text-dim);
+}
+
+button.open-preferences {
+    margin-top: 14px;
+    width: 100%;
+    padding: 13px 18px;
+    border: 0;
+    border-radius: 12px;
+    background: var(--accent);
+    color: #fff;
+    font-family: inherit;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+    -webkit-appearance: none;
+}
+
+button.open-preferences:active {
+    filter: brightness(0.92);
+}
+
+/* ── Platform switching ────────────────────────────────────────────────────
+   show() stamps `platform-ios` / `platform-mac` on <body>. iOS wording is the
+   default so the page is still complete if the host never calls show()
+   (e.g. opening Main.html directly while iterating on the design). */
+
+.platform-mac-only {
+    display: none;
+}
+
+body.platform-mac ol.platform-mac-only {
+    display: block;
+}
+
+body.platform-mac button.platform-mac-only {
+    display: block;
+}
+
+body.platform-mac .platform-ios-only {
+    display: none;
+}
+
+/* ── Footer ────────────────────────────────────────────────────────────── */
+
+footer {
+    margin-top: 28px;
+    text-align: center;
+}
+
+.version {
+    margin: 0;
+    font-size: 12px;
+    color: var(--text-dim);
+}

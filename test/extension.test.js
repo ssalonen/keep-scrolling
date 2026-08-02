@@ -12,6 +12,10 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const script = readFileSync(join(root, 'extension', 'block-reddit-nag.js'), 'utf8');
 const scriptX = readFileSync(join(root, 'extension', 'block-x-nag.js'), 'utf8');
 const manifest = JSON.parse(readFileSync(join(root, 'extension', 'manifest.json'), 'utf8'));
+const appHtml = readFileSync(join(root, 'app', 'Main.html'), 'utf8');
+const appCss = readFileSync(join(root, 'app', 'Style.css'), 'utf8');
+const appScript = readFileSync(join(root, 'app', 'Script.js'), 'utf8');
+const fastfile = readFileSync(join(root, 'fastlane', 'Fastfile'), 'utf8');
 
 test('content script is syntactically valid', () => {
   // Throws on a syntax error; `new Function` never executes the body.
@@ -152,5 +156,66 @@ test('manifest icons exist on disk', () => {
       () => readFileSync(join(root, 'extension', file)),
       `icon file missing: ${file}`,
     );
+  }
+});
+
+// ── Container app UI (app/) ───────────────────────────────────────────────
+// The generated Xcode project is a build artifact, so these guard the only
+// tracked half of the container app: the page itself, and the contract it has
+// with the Fastfile that copies it and the Swift host that drives it.
+
+test('app UI keeps the template contract the Swift host calls into', () => {
+  assert.doesNotThrow(() => new Function(appScript), 'Script.js must be syntactically valid');
+  assert.ok(
+    /function show\(platform, enabled, useSettingsInsteadOfPreferences\)/.test(appScript),
+    'the ViewController calls a global show(platform, enabled, useSettingsInsteadOfPreferences)',
+  );
+  assert.ok(
+    appScript.includes("webkit.messageHandlers.controller.postMessage('open-preferences')"),
+    'the macOS host answers the "open-preferences" message — keep the exact string',
+  );
+});
+
+test('app UI loads nothing from the network (offline WKWebView + the privacy claim it makes)', () => {
+  for (const [name, source] of [['Main.html', appHtml], ['Style.css', appCss], ['Script.js', appScript]]) {
+    assert.ok(!/https?:\/\//.test(source), `${name} must not reference a remote URL`);
+  }
+  // Every referenced asset is a bare filename bundled next to the page.
+  for (const [, ref] of appHtml.matchAll(/(?:src|href)="([^"]+)"/g)) {
+    assert.ok(!ref.includes('/'), `app UI asset must be a sibling file, got: ${ref}`);
+  }
+});
+
+test('app UI overview names every site the extension actually runs on', () => {
+  // Keeps the feature blurb honest if a third site is ever added to the manifest.
+  const hosts = new Set(
+    manifest.content_scripts.flatMap((cs) => cs.matches).map((m) => m.replace(/^\*:\/\/\*\.|\/\*$/g, '')),
+  );
+  for (const host of hosts) {
+    assert.ok(appHtml.includes(host), `app overview does not mention ${host}`);
+  }
+  assert.ok(/Reddit/.test(appHtml) && /\bX\b/.test(appHtml), 'overview must name both Reddit and X');
+});
+
+test('app UI matches what the Fastfile copies and verify_ipa greps for', () => {
+  // apply_app_ui overwrites the template's filenames in place; a file listed
+  // here but absent from app/ (or vice versa) fails the build on a Mac only,
+  // long after CI went green.
+  const listed = fastfile.match(/APP_UI_FILES = \[(.*?)\]/)[1].match(/"([^"]+)"/g).map((s) => s.slice(1, -1));
+  assert.deepEqual(listed, ['Main.html', 'Style.css', 'Script.js']);
+
+  const token = fastfile.match(/APP_UI_VERSION_TOKEN = "([^"]+)"/)[1];
+  assert.ok(appHtml.includes(token), `Main.html must contain ${token} for the version substitution`);
+  assert.ok(appScript.includes(token), 'Script.js must drop the footer if the token survived into a build');
+
+  const marker = fastfile.match(/APP_UI_MARKER = '([^']+)'/)[1];
+  assert.ok(appHtml.includes(marker), `verify_ipa greps the shipped Main.html for ${marker}`);
+});
+
+test('app UI keeps the enable instructions, the one thing a user must act on', () => {
+  assert.ok(/Extensions/.test(appHtml), 'must tell the user where Safari lists extensions');
+  assert.ok(/Allow Always/.test(appHtml), 'must mention Allow Always — otherwise Safari prompts every visit');
+  for (const cls of ['platform-ios-only', 'platform-mac-only']) {
+    assert.ok(appHtml.includes(cls) && appCss.includes(cls), `missing platform switching for ${cls}`);
   }
 });
