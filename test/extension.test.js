@@ -333,6 +333,19 @@ test('the captured HTML is stripped of scripts, styles and credential-shaped val
     assert.ok(!sanitizeHtml(markup).includes(secret), `sanitizeHtml left ${secret} in: ${markup}`);
   }
 
+  // Sloppy-but-valid end tags and `>` inside a quoted value are exactly the
+  // shapes that slip past a naive filter and report the value verbatim
+  // (CodeQL's js/bad-tag-filter).
+  for (const [markup, secret] of [
+    ['<script>var t = "s3cret";</script >', 's3cret'],
+    ['<style>body { background: url(s3cret) }</style foo>', 's3cret'],
+    ['<textarea>s3cret</textarea\n>', 's3cret'],
+    ['<meta content="s3cret" name="a > b csrf-token">', 's3cret'],
+    ['<input title="a > b" value="s3cret">', 's3cret'],
+  ]) {
+    assert.ok(!sanitizeHtml(markup).includes(secret), `sanitizeHtml left ${secret} in: ${markup}`);
+  }
+
   // …while keeping the markup that a nag report is actually about.
   const nag = '<rpl-bottom-sheet blocking open id="app-upsell-blocking-bottom-sheet-seo"></rpl-bottom-sheet>';
   assert.equal(sanitizeHtml(nag), nag);

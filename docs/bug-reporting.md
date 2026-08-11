@@ -91,6 +91,16 @@ Each pattern matches one tag or one attribute and decides in a callback, rather
 than chaining `[^>]*` runs across a tag: the same result with no ambiguous
 backtracking over a megabyte of page HTML.
 
+Two shapes look like pedantry and are not — both leak exactly what the function
+exists to remove, and the tests cover both:
+
+- browsers accept junk inside an end tag (`</script >`, `</style foo>`), so the
+  end-tag patterns are `<\/script\b[^>]*>`, not a literal `</script>`. CodeQL
+  flags the literal version as `js/bad-tag-filter`.
+- a quoted attribute value can contain `>` (`content="a > b"`), which ends a
+  `[^>]*` run early and leaves the rest of the tag unredacted — so the `<meta>`
+  and `<input>` passes walk attributes quote-aware.
+
 ## Versioning
 `extension/build-info.json` carries placeholders (`0.0.0-dev`) in the repo and
 is rewritten in the *generated* project by `apply_build_info` (Fastfile) with

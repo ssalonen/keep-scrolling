@@ -71,22 +71,32 @@
   // Each pattern matches ONE tag or ONE attribute and decides inside a callback,
   // rather than chaining `[^>]*` runs across a tag — same result, no ambiguous
   // backtracking to reason about on a megabyte of hostile input.
+  //
+  // Two details that a naive `<\/script>` / `<tag[^>]*>` pair gets wrong, and
+  // that leak the very values this function exists to remove:
+  //   - browsers accept junk in an end tag (`</script >`, `</style foo>`), so a
+  //     body closed that way would slip past a literal `</script>` match and be
+  //     reported verbatim. CodeQL flags this as js/bad-tag-filter.
+  //   - a quoted attribute value may itself contain `>` (`content="a > b"`),
+  //     which ends a `[^>]*` run early and leaves the rest of the tag
+  //     unredacted — hence the quote-aware attribute walk.
   function sanitizeHtml(html) {
     if (typeof html !== 'string') return '';
     const credential = /token|csrf|auth|session|secret|password|apikey|api[-_]?key/i;
     return html
-      .replace(/(<script\b[^>]*>)[\s\S]*?(<\/script>)/gi, '$1/*…*/$2')
-      .replace(/(<style\b[^>]*>)[\s\S]*?(<\/style>)/gi, '$1/*…*/$2')
-      .replace(/(<textarea\b[^>]*>)[\s\S]*?(<\/textarea>)/gi, '$1…$2')
+      .replace(/(<script\b[^>]*>)[\s\S]*?(<\/script\b[^>]*>)/gi, '$1/*…*/$2')
+      .replace(/(<style\b[^>]*>)[\s\S]*?(<\/style\b[^>]*>)/gi, '$1/*…*/$2')
+      .replace(/(<textarea\b[^>]*>)[\s\S]*?(<\/textarea\b[^>]*>)/gi, '$1…$2')
       // Any attribute the site itself named after a credential.
       .replace(/\s([\w:-]+)="[^"]*"/g, (attribute, name) =>
         (credential.test(name) ? ` ${name}="…"` : attribute))
       // <meta name="csrf-token" content="…">, where the credential-shaped name
       // is on one attribute and the value on another (in either order).
-      .replace(/<meta\b[^>]*>/gi, (tag) =>
+      .replace(/<meta\b(?:"[^"]*"|'[^']*'|[^>"'])*>/gi, (tag) =>
         (credential.test(tag) ? tag.replace(/(\scontent=")[^"]*"/i, '$1…"') : tag))
       // Values typed into the page (search box, login form).
-      .replace(/<input\b[^>]*>/gi, (tag) => tag.replace(/(\svalue=")[^"]*"/i, '$1…"'))
+      .replace(/<input\b(?:"[^"]*"|'[^']*'|[^>"'])*>/gi, (tag) =>
+        tag.replace(/(\svalue=")[^"]*"/i, '$1…"'))
       // Inline images and fonts: enormous, never diagnostic.
       .replace(/((?:src|href)=")data:[^"]{64,}"/gi, '$1data:…"');
   }
