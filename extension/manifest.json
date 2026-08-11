@@ -8,6 +8,16 @@
     "96": "icon-96.png",
     "128": "icon-128.png"
   },
+  "action": {
+    "default_popup": "report.html",
+    "default_title": "Keep Scrolling",
+    "default_icon": {
+      "48": "icon-48.png",
+      "96": "icon-96.png",
+      "128": "icon-128.png"
+    }
+  },
+  "permissions": ["activeTab"],
   "content_scripts": [
     {
       "matches": ["*://*.reddit.com/*"],
@@ -19,6 +29,12 @@
       "matches": ["*://*.x.com/*", "*://*.twitter.com/*"],
       "js": ["block-x-nag.js"],
       "run_at": "document_start",
+      "all_frames": false
+    },
+    {
+      "matches": ["*://*.reddit.com/*", "*://*.x.com/*", "*://*.twitter.com/*"],
+      "js": ["collect-report.js"],
+      "run_at": "document_idle",
       "all_frames": false
     }
   ]

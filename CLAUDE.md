@@ -25,7 +25,15 @@ the independent `extension/block-x-nag.js`. Full background and references:
 - `extension/block-x-nag.js` — the X/Twitter content script. Runs at
   `document_start` on `*://*.x.com/*` and `*://*.twitter.com/*`. Independent
   of the Reddit script — see the "X/Twitter nag" section below.
-- `extension/manifest.json` — MV3 manifest declaring both content scripts.
+- `extension/collect-report.js` — read-only diagnostics collector for bug
+  reports. Runs at `document_idle` on all three hosts; answers a runtime
+  message from the popup with a page snapshot. See "Bug reporting" below.
+- `extension/report.html` + `extension/report.js` — the toolbar popup that turns
+  that snapshot into a prefilled GitHub issue.
+- `extension/build-info.json` — version/build placeholders, stamped at build
+  time by `apply_build_info` and read by `report.js`.
+- `extension/manifest.json` — MV3 manifest declaring the content scripts and the
+  popup action.
 - `extension/icon-{48,96,128}.png` — extension icons.
 - `app/Main.html` — the container app's UI (feature overview + enable steps),
   one self-contained file. Copied over the converter's placeholder page by
@@ -37,11 +45,12 @@ the independent `extension/block-x-nag.js`. Full background and references:
 - `test/extension.test.js` — `node:test` invariant guards (no dependencies).
 - `docs/reddit-nag-remover-plan.md` — Reddit diagnosis, build steps, references.
 - `docs/x-nag-remover-plan.md` — X/Twitter diagnosis and caveats.
+- `docs/bug-reporting.md` — the in-Safari bug reporter: design, redaction, caveats.
 - `docs/FASTLANE-MIGRATION.md` — signing/release pipeline, manual setup steps.
 
 ## Build / release / test
-- **CI** (`ci.yml`): on every push/PR, syntax-checks both scripts and runs
-  `node --test`. On a green push to `main`, computes the next semver from
+- **CI** (`ci.yml`): on every push/PR, syntax-checks the extension scripts,
+  parses the JSON resources, and runs `node --test`. On a green push to `main`, computes the next semver from
   Conventional Commits and triggers a release.
 - **Release** (`release.yml`): on a `v*` tag (or `workflow_call`), a macOS `build`
   job runs `bundle exec fastlane beta` — generate the Xcode project from
@@ -151,6 +160,44 @@ for why).
   `ct=engagement_reply`) intact, and runs on every pass alongside
   `killNags()`. **Unverified on-device** whether removing the param actually
   suppresses the bounce — see `docs/x-nag-remover-plan.md`.
+
+## Bug reporting (`extension/report.*`, `extension/collect-report.js`)
+A toolbar popup (Safari's **ᴀA** menu ▸ Keep Scrolling) lets a user describe a
+nag that got through and file it as a **prefilled GitHub issue** carrying the
+page URL, the shipped version, the scroll-lock state, which nag signatures are
+still in the DOM, and a sanitized copy of the page HTML. It exists because the
+maintenance loop for both scripts starts with "capture a fresh HTML snapshot",
+and iOS gives a user no way to do that. Full design: @docs/bug-reporting.md
+
+- IMPORTANT: the extension **never uploads anything**. The final step is
+  `tabs.create()` on `github.com/…/issues/new?title=…&body=…`; the user reads
+  the text and submits it. No token, no POST, no endpoint — the container app's
+  privacy claim depends on this staying true, and `test/extension.test.js`
+  fails on `XMLHttpRequest`, `POST`, `sendBeacon`, `Authorization`, a second
+  `fetch`, or any remote URL other than the issue form.
+- IMPORTANT: `collect-report.js` is **read-only**. It is a third content script
+  precisely so a diagnostics bug cannot take the nag removal down with it; the
+  tests fail if `.remove()`, `setAttribute`, `classList`, `appendChild` or
+  `innerHTML =` ever appears in it. Do not merge it into either nag script.
+- The snapshot is taken *after* the nag scripts ran, so zero signature matches
+  is the normal case. `scriptsActive` (are `#rnr-style` / `#xnr-style` present?)
+  is what separates "clean page" from "the extension never ran" — if either
+  script ever renames its injected `<style>` id, update `SCRIPT_MARKERS`.
+- GitHub 414s on a long request line, so `fitIssue()` trims to
+  `URL_BUDGET = 6000` chars, cutting the page-HTML block *before* the user's
+  text, and the popup puts the untruncated report on the clipboard whenever it
+  had to cut. Keep that order.
+- `sanitizeHtml()` is best-effort redaction, not a security boundary: a
+  logged-in page's HTML contains that session's content. The popup compensates
+  by showing the exact text before anything is sent and making the HTML block a
+  checkbox — keep both.
+- Unlike `app/Main.html`, the popup **must not** inline its JS: extension pages
+  run under MV3's `script-src 'self'`, which blocks inline scripts. The two
+  pages have opposite constraints for opposite reasons.
+- `build-info.json` is stamped in the *generated* project by `apply_build_info`
+  (like `apply_app_ui`), never in the tracked file, and `verify_ipa` asserts the
+  shipped values. `manifest.json`'s own `version` stays a placeholder — the
+  converter reads it on the way to `Info.plist`.
 
 ## Container app UI (`app/`)
 The container app (the home-screen icon) does nothing functional — the product
