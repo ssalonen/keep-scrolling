@@ -122,12 +122,24 @@ for why).
   that blindly removing any `<aside>` ancestor took out an in-flow reply-list
   region along with it, permanently stalling reply pagination — anchor-only
   removal is the safe fallback when the ancestor isn't the floating banner.
-- Unlike Reddit, `releaseScroll()` here only runs when a nag (banner or
-  blocking modal) was found this pass. X's inline `overflow:hidden` idiom is
-  likely reused by unrelated legitimate modals (compose box, image viewer),
-  so releasing it unconditionally risks fighting those. It also clears an
-  inline `pointer-events:none` — the modal's lock disables the page behind it
-  that way — but only that exact inline value.
+- IMPORTANT: `releaseScroll()` runs on **every** pass, like Reddit's — it is
+  no longer gated on "a nag was found this pass". That gate was the v0.6.x
+  freeze: X locks the page from prompts carrying none of our markers, so the
+  gate never opened and the page stayed frozen with nothing on screen to
+  explain it. A background that scrolls behind an open share sheet is a far
+  cheaper failure than a page that cannot scroll at all.
+- IMPORTANT: the lock has **two shapes** and both must be undone. The
+  original is inline `overflow:hidden` on `<body>`. The newer one comes from
+  `vaul`, the drawer library X now ships (its stylesheet,
+  `[data-vaul-drawer]{touch-action:none…}`, is injected into logged-out post
+  pages): `position:fixed !important` plus `top/left/right/height`, with the
+  scroll offset stashed in a negative `top`. Clear that whole set together
+  **and** `window.scrollTo` back to `-top` — dropping `position` alone
+  releases the scroll but teleports the reader to the top of the thread.
+- `releaseScroll()` only ever clears *inline* values (never computed ones), so
+  a stylesheet-driven overflow rule — X's own layout — is left alone. It also
+  clears an inline `pointer-events:none`, which is how the blocking modal
+  disables the page behind it, but only that exact inline value.
 - IMPORTANT: `injectStyle()` must never throw. At `document_start` there can
   be no `document.documentElement` to append to, and an exception in the
   first `run()` aborts the script *before* the `MutationObserver` is
