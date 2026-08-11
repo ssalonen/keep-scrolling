@@ -12,6 +12,9 @@ extension/
   manifest.json
   block-reddit-nag.js      <- Reddit content script
   block-x-nag.js           <- X/Twitter content script (independent, see x-nag-remover-plan.md)
+  collect-report.js        <- read-only diagnostics collector (see bug-reporting.md)
+  report.html / report.js  <- toolbar popup: describe a nag, file a prefilled GitHub issue
+  build-info.json          <- version/build, stamped at build time by apply_build_info
   icon-48.png / icon-96.png / icon-128.png
 app/
   Main.html                <- container-app UI (self-contained: inline CSS/JS/icon),
@@ -28,15 +31,20 @@ fastlane/
 Gemfile                    <- pins fastlane
 docs/reddit-nag-remover-plan.md
 docs/x-nag-remover-plan.md <- X/Twitter diagnosis and caveats
+docs/bug-reporting.md      <- in-Safari bug reporter: design, redaction, caveats
 docs/FASTLANE-MIGRATION.md <- signing/release pipeline + one-time manual setup
 icon.png                   <- 512px icon
 test/extension.test.js     <- node:test invariant guards (no deps)
 ```
 
 ## manifest.json (MV3)
-A content script scoped by `matches` is all that is needed — no `permissions`
-/ `host_permissions` block. The user just toggles the extension on for
+The nag removal itself needs nothing but content scripts scoped by `matches` —
+no `host_permissions` block. The user just toggles the extension on for
 reddit.com in Safari settings.
+
+The only permission requested is `activeTab`, and only for the bug reporter:
+the popup needs the current tab's id (and, when the collector is unreachable,
+its URL) to build a report. See `bug-reporting.md`.
 
 ## Build & distribution (CI → TestFlight)
 This repo does **not** commit an Xcode project. `fastlane`'s `beta` lane
