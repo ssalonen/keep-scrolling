@@ -169,12 +169,47 @@ test('X script defuses launch_app_store=true on both href and data-href (engagem
   );
 });
 
-test('X script releases scroll only when the banner is found', () => {
+test('X script releases scroll on every pass, not only when a nag was matched', () => {
   assert.ok(/function\s+releaseScroll/.test(scriptX), 'releaseScroll() must exist');
   assert.ok(/function\s+killNags/.test(scriptX), 'killNags() must exist');
+  // The release used to be gated on `hit`. X locks the page from prompts that
+  // carry none of our markers, so the gate never opened and the page stayed
+  // frozen with nothing on screen to explain it.
   assert.ok(
-    /if\s*\(\s*hit\s*\)\s*releaseScroll\(\)/.test(scriptX),
-    'releaseScroll() must be gated on hit, unlike the unconditional Reddit release',
+    !/if\s*\(\s*hit\s*\)\s*releaseScroll\(\)/.test(scriptX),
+    'releaseScroll() must not be gated on hit — a lock we cannot attribute to a recognised nag ' +
+      'is exactly the case that leaves the page frozen',
+  );
+  assert.ok(
+    /releaseScroll\(\);\s*\n\s*return hit;/.test(scriptX),
+    'killNags() must re-assert scroll unconditionally, matching the Reddit script',
+  );
+});
+
+test('X script undoes the position:fixed body lock and restores the scroll offset', () => {
+  // The `vaul` drawer library X now ships locks the page with
+  // position:fixed !important + a negative `top` holding the scroll offset,
+  // not with overflow:hidden. Clearing `position` without reading `top` back
+  // releases the scroll but teleports the reader to the top of the thread.
+  const match = scriptX.match(/function releaseScroll\(\) \{[\s\S]*?\n  \}/);
+  assert.ok(match, 'releaseScroll() not found in source');
+  const body = match[0];
+  assert.ok(body.includes("s.position === 'fixed'"), 'must detect the position:fixed lock');
+  assert.ok(/removeProperty\(prop\)/.test(body), 'must clear the whole pinned-position set');
+  assert.ok(/window\.scrollTo\(0,\s*-offset\)/.test(body), 'must restore the stashed scroll offset');
+  assert.ok(
+    body.includes("s.overflow === 'hidden'"),
+    'must still handle the original inline overflow:hidden lock',
+  );
+});
+
+test('X script only ever clears INLINE lock styles', () => {
+  // A stylesheet-driven overflow rule is the page's own layout; touching it
+  // would be fighting X's design rather than its nag.
+  const body = scriptX.match(/function releaseScroll\(\) \{[\s\S]*?\n  \}/)[0];
+  assert.ok(
+    !/getComputedStyle/.test(body),
+    'releaseScroll() must read el.style (inline) only, never computed styles',
   );
 });
 

@@ -17,11 +17,14 @@
 //    legally-required cookie-consent banner
 //    (div[role="region"][aria-label="Cookie consent"]) that must never be
 //    touched.
-//  - The observed scroll lock is an *inline* style="overflow:hidden" on
-//    <body> (no dedicated lock class like Reddit's). releaseScroll() only
-//    runs when the banner itself was found this pass, so we don't fight
-//    unrelated X UI (compose box, image viewer, etc.) that may reuse the
-//    same inline-style lock idiom.
+//  - The scroll lock is an *inline* style on <body> (no dedicated lock class
+//    like Reddit's), and it comes in two shapes: the original
+//    style="overflow:hidden", and — since X moved its logged-out prompts onto
+//    the `vaul` drawer library — style="position:fixed" with the scroll offset
+//    stashed in a negative `top`. releaseScroll() undoes both, and runs on
+//    every pass rather than only when a nag was matched: a lock we cannot
+//    attribute to a nag we recognise is exactly the case that leaves the page
+//    frozen with nothing on screen to explain it.
 //  - X also ships a *blocking* variant: a full-screen modal titled "See this
 //    post in the app" (role="dialog" aria-modal, `fixed inset-0 touch-none`)
 //    that covers the page and swallows touches, so the page cannot be scrolled
@@ -55,16 +58,39 @@
   // badge popover, the share menu, etc.).
   const APP_OBSTRUCTION_SELECTOR = '[data-interaction^="app-store-obstruction"]';
 
-  // --- Release the page scroll (inline overflow/pointer-events only) ---------
+  // --- Release the page scroll (inline lock styles only) ---------------------
+  // Only ever clears *inline* values, so a stylesheet-driven overflow rule
+  // (i.e. the page's own layout) is left alone.
   function releaseScroll() {
     for (const el of [document.documentElement, document.body]) {
       if (!el || !el.style) continue;
-      if (el.style.overflow === 'hidden') el.style.overflow = '';
-      // The modal's scroll lock also disables interaction with everything
-      // behind it via an inline pointer-events:none — clear only that exact
-      // inline value, never a stylesheet-driven one.
-      if (el.style.pointerEvents === 'none') el.style.pointerEvents = '';
-      el.style.removeProperty('padding-right');
+      const s = el.style;
+
+      // 1. The original lock: style="overflow: hidden".
+      if (s.overflow === 'hidden') s.overflow = '';
+      if (s.overflowY === 'hidden') s.overflowY = '';
+
+      // 2. The `vaul` drawer lock. X now ships that library (its stylesheet,
+      //    [data-vaul-drawer]{touch-action:none…}, is injected into logged-out
+      //    post pages) and it pins the page with position:fixed !important
+      //    plus top/left/right/height, keeping the scroll offset in a negative
+      //    `top`. Undo the whole set together and scroll back to where the
+      //    user was — dropping `position` on its own teleports them to the top.
+      if (s.position === 'fixed') {
+        const offset = parseInt(s.top, 10);
+        for (const prop of ['position', 'top', 'left', 'right', 'width', 'height']) {
+          s.removeProperty(prop);
+        }
+        if (Number.isFinite(offset) && offset < 0) {
+          try { window.scrollTo(0, -offset); } catch { /* ignore */ }
+        }
+      }
+
+      // 3. The blocking modal's lock also disables interaction with everything
+      //    behind it via an inline pointer-events:none — clear only that exact
+      //    inline value, never a stylesheet-driven one.
+      if (s.pointerEvents === 'none') s.pointerEvents = '';
+      s.removeProperty('padding-right');
     }
   }
 
@@ -96,10 +122,15 @@
       hit = true;
     }
 
-    // Only release scroll when we actually found a nag (banner or blocking
-    // modal): X reuses plain inline overflow:hidden for unrelated modals, and
-    // we don't want to fight those.
-    if (hit) releaseScroll();
+    // Always re-assert scroll, like the Reddit script does. This used to be
+    // gated on `hit`, on the theory that X reuses the inline overflow:hidden
+    // idiom for legitimate modals we shouldn't fight. On-device that gate is
+    // what breaks: X locks the page from prompts that carry none of the
+    // markers above (the vaul-drawer variant), so `hit` stays false and the
+    // page stays frozen with no nag on screen. A background that scrolls
+    // behind an open share sheet is a far cheaper failure than a page that
+    // cannot scroll at all.
+    releaseScroll();
     return hit;
   }
 
