@@ -105,6 +105,25 @@
         margin-bottom: 12px;
         background: var(--bg-elevated);
         border-radius: var(--radius);
+        /* The symptom options are <label>s so the whole row is a tap target,
+           which means they would otherwise inherit the uppercase, dimmed
+           styling of the field labels above them. These are sentences. */
+        font-weight: 400;
+        text-transform: none;
+        letter-spacing: normal;
+        color: var(--text);
+    }
+
+    /* The symptom checkboxes read as one grouped list, so they sit tighter
+       than the standalone "include page HTML" option below them. */
+    #symptoms {
+        margin-bottom: 14px;
+    }
+
+    #symptoms .option {
+        margin-bottom: 6px;
+        padding: 11px 12px;
+        cursor: pointer;
     }
 
     .option input {
@@ -198,16 +217,23 @@
     <label for="title">Title</label>
     <input type="text" id="title" autocapitalize="sentences" autocomplete="off">
 
-    <label for="description">What happened?</label>
+    <!-- Filled in from SYMPTOMS in report.js, so the label you tap and the line
+         the issue gets are the same string. -->
+    <label id="symptoms-label">What went wrong? Tick all that apply</label>
+    <div id="symptoms" role="group" aria-labelledby="symptoms-label"></div>
+
+    <label for="description">Anything else?</label>
     <textarea id="description" placeholder="e.g. the “See this post in the app” pop-up came back after scrolling, and the page froze."></textarea>
 
     <div class="option">
         <input type="checkbox" id="include-html" checked>
         <span>
             Include page HTML
-            <small>Scripts, styles and credential-shaped values are stripped, but the page’s own
-                content — including anything a logged-in session shows — is not. GitHub issues are
-                public: check the preview before filing.</small>
+            <small>The snapshot that makes a report fixable. It is too big for the prefilled
+                link, so it travels on your clipboard — the issue tells you where to paste it.
+                Scripts, styles, meta values and credential-shaped values are stripped, but the
+                page’s own content — including anything a logged-in session shows — is not.
+                GitHub issues are public: check the preview before filing.</small>
         </span>
     </div>
 

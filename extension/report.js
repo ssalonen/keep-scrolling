@@ -2,8 +2,9 @@
 // Popup logic for the "Report a problem" sheet (report.html).
 //
 // It asks the collector content script for a snapshot of the current page,
-// formats it together with whatever the user typed and the shipped build
-// version, and hands the result to GitHub as a PREFILLED new-issue URL.
+// formats it together with the symptoms the user ticked, whatever they typed
+// and the shipped build version, and hands the result to GitHub as a PREFILLED
+// new-issue URL.
 //
 // Design notes:
 //  - Nothing is ever uploaded from here. There is no API token, no POST, no
@@ -12,9 +13,10 @@
 //    reads and submits themselves. That keeps the app's "nothing leaves your
 //    device" promise honest — the user is the transport.
 //  - GitHub answers an over-long request line with 414, so the prefilled URL is
-//    budgeted (URL_BUDGET) and the page-HTML block is shrunk until it fits.
-//    The untruncated report stays available via the Copy button, for pasting
-//    into the issue after it opens.
+//    budgeted (URL_BUDGET) and fitIssue() drops whole sections until it fits,
+//    page HTML first. The page HTML realistically never fits, so the full
+//    report always goes to the clipboard and the issue body says where to paste
+//    it — a report without the snapshot cannot be acted on.
 //  - The version comes from build-info.json, which the Fastfile stamps at
 //    build time (manifest.json's own version is a fixed placeholder the
 //    converter only reads on the way to Info.plist). Without it every report
@@ -32,6 +34,33 @@ const COLLECT_MESSAGE = 'keep-scrolling:collect';
 // stay comfortably under it, since the URL also has to survive being handed to
 // Safari.
 const URL_BUDGET = 6000;
+
+// The handful of things that actually go wrong, as a multi-select. A user who
+// taps two boxes gives a more useful report than one who types nothing, and
+// these three are what the two nag scripts fail at: a nag we did not remove, a
+// scroll lock we did not release, and an overlay we did not recognise (which
+// is the pair happening at once, and points somewhere different).
+//
+// `title` seeds the issue title; `label` is what the issue body says.
+const SYMPTOMS = [
+  { id: 'nag', title: 'Nag still visible', label: 'The nag or pop-up is still visible' },
+  { id: 'scroll', title: 'Page will not scroll', label: 'The page will not scroll' },
+  { id: 'overlay', title: 'Overlay covers the page', label: 'An overlay covers the whole page' },
+  { id: 'other', title: 'Problem', label: 'Something else (see the description)' },
+];
+
+// How much of the collector's overlay list goes into the prefilled URL. It is
+// the block that has to survive the trim on a real page — the untrimmed list
+// is in the clipboard copy — so it is kept to roughly a third of the budget.
+const ISSUE_OVERLAYS = 3;
+const ISSUE_TAG_LIMIT = 160;
+const ISSUE_TEXT_LIMIT = 80;
+
+// The page HTML is the one part that never fits a prefilled URL (see fitIssue).
+// Say so in the issue itself, so the report reads as "paste pending" rather
+// than as a complete report that happens to be missing its snapshot.
+const HTML_OMITTED_NOTE = '_The sanitized page HTML did not fit in the prefilled link — '
+  + 'it is on the clipboard. **Paste it here before submitting.**_';
 
 // ── Report formatting (pure — kept top-level so the tests can drive it) ──────
 
@@ -53,29 +82,52 @@ function formatEnvironment(env) {
 }
 
 function buildBody(parts) {
-  const { description, environment, pageState, html, htmlNote } = parts;
-  const sections = [
-    (description || '').trim() || '_No description provided._',
-    '',
-    '### Environment',
-    '',
-    formatEnvironment(environment || {}),
-  ];
+  const {
+    symptoms, description, environment, pageState, diagnostics, samples, html, htmlNote, htmlOmitted,
+  } = parts;
+  const chosen = symptoms || [];
+  const text = (description || '').trim();
+  const sections = [];
+
+  if (chosen.length) {
+    sections.push('### What happened', '', chosen.map((symptom) => `- ${symptom.label}`).join('\n'), '');
+  }
+  if (text) sections.push(text, '');
+  else if (!chosen.length) sections.push('_No description provided._', '');
+
+  sections.push('### Environment', '', formatEnvironment(environment || {}));
 
   if (pageState) {
     sections.push('', '### Page state', '', fence('json', pageState));
   }
 
+  if (diagnostics) {
+    sections.push('', '### Overlays and components', '', fence('json', diagnostics));
+  }
+
+  if (samples) {
+    sections.push(
+      '',
+      '<details><summary>Matched signatures (sanitized)</summary>',
+      '',
+      fence('json', samples),
+      '',
+      '</details>',
+    );
+  }
+
   if (html) {
     sections.push(
       '',
-      '<details><summary>Page HTML (sanitized, truncated)</summary>',
+      '<details><summary>Page HTML (sanitized)</summary>',
       '',
       fence('html', html),
       '',
       '</details>',
     );
     if (htmlNote) sections.push('', htmlNote);
+  } else if (htmlOmitted) {
+    sections.push('', '### Page HTML', '', HTML_OMITTED_NOTE);
   }
 
   sections.push('', '<sub>Filed from the Keep Scrolling Safari extension.</sub>');
@@ -89,48 +141,73 @@ function issueUrl(title, body) {
   return url.toString();
 }
 
-// Shrink the report until the prefilled URL fits GitHub's request-line limit.
-// The page HTML is the only unbounded part, so it is cut first and the user's
-// own words survive; only if the text alone still overflows does the whole body
-// get clipped. Returns the fitted body, its URL, and whether anything was lost
-// (the caller offers the full text on the clipboard when it was).
+// Shrink the report until the prefilled URL fits GitHub's request-line limit,
+// dropping whole sections in increasing order of usefulness. Returns the fitted
+// body, its URL, and whether anything was lost — the caller puts the full
+// report on the clipboard whenever it was.
+//
+// Sections go whole rather than being nibbled down, because the two unbounded
+// ones are worthless in pieces. Half a page HTML is the top of <head>: link
+// tags and meta, never the nag, which sits deep in <body>. It would eat the
+// budget and tell nobody anything. The same goes for a JSON blob cut mid-key.
+// So what fits is a complete, if shorter, report — and the full one, page HTML
+// included, travels on the clipboard.
 function fitIssue(title, parts, budget) {
-  const fullHtml = parts.html || '';
-  let html = fullHtml;
-  let body = buildBody({ ...parts, html });
-  let url = issueUrl(title, body);
-  let truncated = false;
+  const attempt = (override) => {
+    const body = buildBody({ ...parts, ...override });
+    return { body, url: issueUrl(title, body) };
+  };
 
+  let fitted = attempt({});
+  if (fitted.url.length <= budget) return { ...fitted, truncated: false };
+
+  // 1. The page HTML: unbounded, and the one part the clipboard carries in full.
+  const dropped = { html: '', htmlOmitted: !!parts.html };
+  fitted = attempt(dropped);
+  if (fitted.url.length <= budget) return { ...fitted, truncated: true };
+
+  // 2. The matched-signature markup: bulky, and a subset of that same HTML.
+  Object.assign(dropped, { samples: '' });
+  fitted = attempt(dropped);
+  if (fitted.url.length <= budget) return { ...fitted, truncated: true };
+
+  // 3. The overlay/component summary. Deliberately kept small enough that a
+  //    real report gets this far with it intact — it is what names an
+  //    unrecognised nag when the page HTML could not come along.
+  Object.assign(dropped, { diagnostics: '' });
+  fitted = attempt(dropped);
+  if (fitted.url.length <= budget) return { ...fitted, truncated: true };
+
+  // 4. The lock/signature state. Past here the symptoms, the user's own words
+  //    and the version are all that is left, and they are the point.
+  Object.assign(dropped, { pageState: '' });
+  fitted = attempt(dropped);
+  if (fitted.url.length <= budget) return { ...fitted, truncated: true };
+
+  // Still over budget with everything structured gone: the typed description
+  // itself is huge. Clip the body — a filed-but-shortened issue beats a 414.
   // Each dropped character is worth up to three URL-encoded ones, so divide the
   // overshoot by three (plus slack for the truncation marker) to guarantee the
   // loop shrinks and terminates rather than nibbling one char at a time.
-  while (url.length > budget && html.length > 0) {
-    const excess = url.length - budget;
-    const keep = Math.max(0, html.length - Math.ceil(excess / 3) - 64);
-    html = keep > 0 ? truncate(html, keep) : '';
-    body = buildBody({ ...parts, html });
-    url = issueUrl(title, body);
-    truncated = true;
-  }
-
-  // Still over budget with no HTML left: the typed description itself is huge.
-  // Clip the whole body — a filed-but-shortened issue beats a 414.
+  let { body, url } = fitted;
   while (url.length > budget) {
     const excess = url.length - budget;
     const keep = body.length - Math.ceil(excess / 3) - 64;
     body = truncate(body, Math.max(200, keep));
     url = issueUrl(title, body);
-    truncated = true;
     if (keep < 200) break;
   }
 
-  return { body, url, truncated };
+  return { body, url, truncated: true };
 }
 
-function defaultTitle(url) {
+// Seeded from the first symptom the user ticked, so a report about a frozen
+// page does not arrive titled "nag not removed".
+function defaultTitle(url, symptoms) {
   let host = '';
   try { host = new URL(url).hostname.replace(/^www\./, ''); } catch { /* not a URL */ }
-  return host ? `Nag not removed on ${host}` : 'Bug report';
+  const lead = (symptoms && symptoms.length && symptoms[0].title) || 'Nag not removed';
+  return host ? `${lead} on ${host}` : lead;
 }
 
 // The collector's snapshot → the two report sections. Kept separate from
@@ -152,11 +229,46 @@ function describeSnapshot(snapshot, buildInfo) {
     'Page scrollable': snapshot.lock ? String(snapshot.lock.scrollable) : undefined,
   };
 
-  const pageState = snapshot.lock || snapshot.signatures
-    ? JSON.stringify({ lock: snapshot.lock, signatures: snapshot.signatures }, null, 2)
+  // Three blocks, not one, because the trim drops whole sections and the
+  // prefilled URL only has room for about two. Smallest and most valuable
+  // first: `pageState` is the lock plus a selector→count tally, `diagnostics`
+  // is a trimmed list of what is covering the page, and the bulky matched
+  // markup goes last in `samples`, where it is dropped first.
+  const signatures = snapshot.signatures || [];
+  const counts = {};
+  for (const found of signatures) counts[found.selector] = found.count;
+
+  // Flattened out of the collector's element list: the same facts, minus the
+  // wrapper keys, which is a few hundred URL-encoded characters saved on the
+  // one block that must never be the thing that gets dropped.
+  const lock = snapshot.lock && {
+    scrollable: snapshot.lock.scrollable,
+    ...Object.fromEntries((snapshot.lock.elements || []).map((el) => [
+      el.element,
+      el.present ? { class: el.class, style: el.style, ...el.computed } : 'absent',
+    ])),
+  };
+
+  const pageState = lock || signatures.length
+    ? JSON.stringify({ lock, signatures: counts }, null, 2)
     : '';
 
-  return { environment, pageState };
+  // Trimmed to fit: the point of this block is that it survives the URL trim,
+  // and the untrimmed version is in the clipboard copy either way.
+  const overlays = (snapshot.overlays || []).slice(0, ISSUE_OVERLAYS).map((overlay) => ({
+    ...overlay,
+    tag: truncate(overlay.tag, ISSUE_TAG_LIMIT),
+    text: truncate(overlay.text, ISSUE_TEXT_LIMIT),
+  }));
+  const components = snapshot.components || [];
+  const diagnostics = overlays.length || components.length
+    ? JSON.stringify({ overlays, components }, null, 1)
+    : '';
+
+  const matched = signatures.filter((found) => found.sample);
+  const samples = matched.length ? JSON.stringify(matched, null, 1) : '';
+
+  return { environment, pageState, diagnostics, samples };
 }
 
 // ── Popup wiring ────────────────────────────────────────────────────────────
@@ -210,9 +322,28 @@ async function copyText(text) {
   }
 }
 
+// The checkboxes are rendered from SYMPTOMS rather than written into
+// report.html, so the label a user taps and the line the issue body gets are
+// the same string. (An extension page may not inline a <script>, but it may
+// build its own DOM.)
+function renderSymptoms(container) {
+  for (const symptom of SYMPTOMS) {
+    const option = document.createElement('label');
+    option.className = 'option';
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.value = symptom.id;
+    const text = document.createElement('span');
+    text.textContent = symptom.label;
+    option.append(box, text);
+    container.append(option);
+  }
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   const titleField = document.getElementById('title');
   const descriptionField = document.getElementById('description');
+  const symptomList = document.getElementById('symptoms');
   const includeHtml = document.getElementById('include-html');
   const preview = document.getElementById('preview');
   const status = document.getElementById('status');
@@ -220,10 +351,22 @@ document.addEventListener('DOMContentLoaded', async () => {
   const copyButton = document.getElementById('copy');
   const pageLabel = document.getElementById('page');
 
-  const [buildInfo, snapshot] = await Promise.all([readBuildInfo(), readSnapshot()]);
-  const { environment, pageState } = describeSnapshot(snapshot, buildInfo);
+  renderSymptoms(symptomList);
+  const selectedSymptoms = () => {
+    const checked = new Set(
+      [...symptomList.querySelectorAll('input:checked')].map((box) => box.value),
+    );
+    return SYMPTOMS.filter((symptom) => checked.has(symptom.id));
+  };
 
+  const [buildInfo, snapshot] = await Promise.all([readBuildInfo(), readSnapshot()]);
+  const { environment, pageState, diagnostics, samples } = describeSnapshot(snapshot, buildInfo);
+
+  // The title tracks the ticked symptoms until the user types their own.
+  let titleEdited = false;
   titleField.value = defaultTitle(snapshot.url);
+  titleField.addEventListener('input', () => { titleEdited = true; });
+
   pageLabel.textContent = snapshot.unreachable
     ? 'No page details — open this from a Reddit or X tab with the extension allowed.'
     : snapshot.url;
@@ -234,11 +377,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function parts() {
     return {
+      symptoms: selectedSymptoms(),
       description: descriptionField.value,
       environment,
       pageState: snapshot.unreachable ? '' : pageState,
+      diagnostics: snapshot.unreachable ? '' : diagnostics,
+      samples: snapshot.unreachable ? '' : samples,
       html: includeHtml.checked ? snapshot.html : '',
-      htmlNote: '<sub>Scripts, styles, credential-shaped attributes and typed-in values were stripped before capture.</sub>',
+      htmlNote: '<sub>Scripts, styles, meta values, credential-shaped attributes and typed-in values were stripped before capture.</sub>',
     };
   }
 
@@ -254,9 +400,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     return body;
   }
 
-  descriptionField.addEventListener('input', refresh);
+  // The body now carries up to 400 KB of page HTML, so rebuilding it on every
+  // keystroke is real work on a phone. Typing is the only high-frequency
+  // input; everything else refreshes immediately.
+  let pending;
+  descriptionField.addEventListener('input', () => {
+    clearTimeout(pending);
+    pending = setTimeout(refresh, 150);
+  });
   includeHtml.addEventListener('change', refresh);
   disclosure.addEventListener('toggle', refresh);
+  symptomList.addEventListener('change', () => {
+    if (!titleEdited) titleField.value = defaultTitle(snapshot.url, selectedSymptoms());
+    refresh();
+  });
   refresh();
 
   copyButton.addEventListener('click', async () => {
@@ -266,11 +423,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   fileButton.addEventListener('click', async () => {
     const full = refresh();
-    const title = titleField.value.trim() || defaultTitle(snapshot.url);
+    const chosen = selectedSymptoms();
+    const title = titleField.value.trim() || defaultTitle(snapshot.url, chosen);
     const fitted = fitIssue(title, parts(), URL_BUDGET);
 
-    // Only what fits survives the URL. When that cost us page HTML, put the
-    // whole thing on the clipboard so the user can paste it into the issue.
+    // Only what fits survives the URL, and the page HTML essentially never
+    // does. Put the whole report on the clipboard so the user can paste it in
+    // — the note in the issue body tells them to.
     if (fitted.truncated) await copyText(full);
 
     try {

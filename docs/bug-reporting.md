@@ -3,9 +3,10 @@
 ## Goal
 Let a user who hits a nag the extension misses file a GitHub issue **from the
 page it happened on**, with the diagnostic material that is otherwise
-impossible to get off an iPhone: the page URL, the shipped build version, the
-scroll-lock state, which nag signatures are still in the DOM, and a sanitized
-copy of the page HTML.
+impossible to get off an iPhone: which of the three known failures they saw,
+the page URL, the shipped build version, the scroll-lock state, which nag
+signatures are still in the DOM, what is pinned over the viewport, which
+components the page loaded, and a sanitized copy of the page HTML.
 
 Without this, every report is "it doesn't work on X" with no snapshot, and the
 maintenance loop both nag scripts are built around — *capture a fresh HTML
@@ -38,20 +39,55 @@ one exception is spelled out on that screen.
 `POST`, a `sendBeacon`, an `Authorization` header, a second `fetch`, or any
 remote URL besides the issue form.
 
+## What the user is asked
+Three checkboxes and a text box. The checkboxes (`SYMPTOMS` in `report.js`) are
+the three ways the extension actually fails — *the nag is still visible*, *the
+page will not scroll*, *an overlay covers the whole page* — plus *something
+else*. They exist because the two halves come apart: a visible nag with a
+working page and a frozen page with nothing on it are different bugs in
+different code, and the third is the pair at once. A user who taps two boxes has
+filed something more useful than one who types nothing.
+
+Ticking a box also seeds the issue title, so a report about a frozen page does
+not arrive titled "nag not removed"; the title stops following the boxes as soon
+as the user edits it. The checkboxes are rendered from `SYMPTOMS` at runtime
+rather than written into `report.html`, so the label a user taps and the line
+the issue gets cannot drift apart — the test suite fails if a label is
+duplicated into the page.
+
 ## The URL budget
 GitHub answers an over-long request line with **414**, well before the ~8 KB
 most servers allow, so the prefilled URL is budgeted at `URL_BUDGET = 6000`
 characters (URL-encoded, which inflates HTML by up to 3×).
 
-`fitIssue()` shrinks the report until it fits, in a deliberate order:
+That budget holds roughly 2 000 characters of report, and the page HTML alone
+runs to six figures — so the URL was never going to be the transport for it.
+**The clipboard is.** `fitIssue()` drops whole sections until the rest fits, in
+increasing order of usefulness:
 
-1. the page-HTML block (the only unbounded part) is cut first;
-2. only if the text alone still overflows is the whole body clipped.
+1. the page HTML;
+2. the matched-signature markup (a subset of that same HTML);
+3. the overlay/component summary;
+4. the lock and signature counts;
+5. only then is the remaining text clipped.
 
-So the user's own words, the version, and the page state always survive. When
-anything was cut, the popup puts the **full** report on the clipboard, so it can
-be pasted into the issue after GitHub opens. The Copy button does the same on
-demand.
+Sections go **whole**, not nibbled down. Half a page snapshot is the top of
+`<head>` — link tags and meta, never the nag, which sits deep in `<body>`; it
+would spend the entire budget and still be undiagnosable. A JSON block cut
+mid-key is worse. What survives is a shorter but complete report.
+
+When the page HTML is dropped, the issue body says so **in place of it** and
+points at the clipboard, which the popup loads with the untruncated report
+whenever anything was cut. Without that line the issue reads like a finished
+report that merely lacks a snapshot, and nobody pastes anything. The Copy
+button does the same on demand.
+
+`describeSnapshot()` splits the page details into those tiers deliberately, and
+sizes the middle one to survive: the overlay list is trimmed to the three
+biggest covers with the opening tag capped at 160 characters, because a
+diagnostics block that gets dropped on every real page is the same as never
+having collected it. A test measures a realistic X-status-page report end to
+end and fails if the lock state or the overlay summary stops fitting.
 
 ## What the snapshot contains, and why
 `collect-report.js` is a third content script on the same hosts as the two nag
@@ -69,16 +105,46 @@ so a bug in the reporter can never break browsing.
   can actually scroll. That is the half of the problem the user feels.
 - `signatures` — counts and one sanitized sample per known nag selector, from
   the union of both scripts' signature lists (over-matching is harmless here:
-  nothing is removed).
-- `html` — `documentElement.outerHTML`, sanitized and capped at 120 000 chars
-  before it crosses the message port.
+  nothing is removed). It also carries `[data-vaul-drawer]`, which neither
+  script removes — a page locked by a drawer we have no selector for is exactly
+  the case this reporter exists for.
+- `overlays` — every **pinned element covering ≥10 % of the viewport**, biggest
+  first: its opening tag, computed `z-index`/`pointer-events`/`touch-action`,
+  and its visible text. Every nag either script has had to remove is that
+  shape, so this names an *unrecognised* one — turning "the whole page is
+  covered by something" into a selector someone can write. The scan touches
+  every element on the page, so it is capped (`OVERLAY_SCAN_LIMIT`) and runs
+  only when the popup asks.
+- `components` — the module names the page preloads, with the content hash
+  stripped (`logged-out-open-app-banner-D4f8Xq2b.js` → `logged-out-open-app-banner`).
+  Both diagnoses in `docs/` started here: that name identified X's banner, and
+  `vaul`'s stylesheet identified the scroll lock, before either was matched in
+  the DOM. A few hundred bytes, so they reach the issue even when the page HTML
+  cannot.
+- `html` — `documentElement.outerHTML`, sanitized and capped at 400 000 chars
+  before it crosses the message port. The cap is generous because the clipboard
+  carries this, not the URL, and a snapshot cut off inside `<head>` is not
+  something anyone can diagnose from.
 
 ## Redaction, and its limits
 `sanitizeHtml()` strips `<script>` / `<style>` / `<textarea>` bodies, redacts
 attributes whose *name* looks like a credential (`token`, `csrf`, `auth`,
-`session`, `secret`, `password`, `api key`), redacts `<meta content="…">` on a
-credential-named meta, blanks `<input value="…">`, and truncates long `data:`
-URIs.
+`session`, `secret`, `password`, `api key`, `nonce`), redacts the `content` of
+**every** `<meta>`, blanks `<input value="…">`, and truncates long `data:` URIs.
+
+### Why every `<meta>`, not just credential-shaped ones
+Redacting `<meta>` on a credential-shaped *name* only ever caught the honest
+cases — `csrf-token` announces itself. The head is also where a page parks its
+CSP nonce, its Sentry trace and baggage ids, request ids and build hashes,
+under names no pattern predicts, and a bug report carries them into a public
+issue. The exchange is free: `<meta>` content is of no use in diagnosing a nag,
+which lives in the `<body>` and is found by structure. So the default flipped —
+everything is redacted except a short allowlist (`viewport`, `charset`,
+`color-scheme`, `theme-color`, `referrer`, `robots`, `generator`) that describes
+how the page lays itself out and can hold nothing session-specific.
+
+The same reasoning added `nonce` to the credential names: a CSP nonce rides on
+the tags themselves, not only on a meta.
 
 It is **best-effort, not a security boundary**: the HTML of a logged-in session
 inevitably contains that session's content, and it can't be redacted away
@@ -100,6 +166,18 @@ exists to remove, and the tests cover both:
 - a quoted attribute value can contain `>` (`content="a > b"`), which ends a
   `[^>]*` run early and leaves the rest of the tag unredacted — so the `<meta>`
   and `<input>` passes walk attributes quote-aware.
+
+## Headless regression run
+The whole loop is DOM-only, so it can be driven in a desktop browser without a
+device: load a fixture page with the collector injected and a stub
+`runtime.onMessage`, ask it for a snapshot, then open `report.html` with a
+stubbed `browser.tabs` and click **Open GitHub issue**. That run is what caught
+the diagnostics block being silently dropped from every prefilled URL for being
+2.7 KB — the unit tests passed the whole time, because each part worked and only
+the sizes were wrong. Worth repeating after any change to the sections or the
+budget: assert the secrets in the fixture do not appear in the snapshot, and
+that the opened URL is under budget with the lock state and overlay summary
+still in it.
 
 ## Versioning
 `extension/build-info.json` carries placeholders (`0.0.0-dev`) in the repo and
@@ -147,7 +225,20 @@ and be useless for bisecting a regression.
   looks like that on device, and not like an empty sheet.
 - **Clipboard.** `navigator.clipboard.writeText` from an extension popup should
   work in a secure context under a user gesture; there is an
-  `execCommand('copy')` fallback, unverified on iOS.
+  `execCommand('copy')` fallback, unverified on iOS. This now carries more
+  weight than it used to: the page HTML reaches the issue **only** through the
+  clipboard. If it turns out not to work on iOS, the fallback worth trying is
+  a second tab with the snapshot in a `<textarea>` for the user to select.
 - **Budget realism.** 6000 was chosen with headroom, not measured against
   GitHub's actual ceiling. If prefilled links start 414ing, lower it; the
   clipboard path is unaffected.
+- **Overlay scan cost.** `collectOverlays()` calls `getComputedStyle()` on up
+  to 8 000 elements. Measured only in a desktop headless run, where it is
+  imperceptible; on an older iPhone it may be a visible pause between opening
+  the popup and the sheet filling in. If so, cut `OVERLAY_SCAN_LIMIT` or scan
+  only `document.body`'s first few levels of children — the nags we know of are
+  all shallow.
+- **Overlay noise.** The scan reports what is pinned over the page, including
+  X's cookie-consent banner. That is correct — it is read-only reporting, not
+  removal — but a reader of an issue should not mistake the list for a list of
+  things to remove.
