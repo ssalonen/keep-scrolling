@@ -246,8 +246,21 @@ function loadReportHelpers() {
   const pure = scriptReport.slice(0, scriptReport.indexOf(marker));
   assert.ok(scriptReport.includes(marker), 'report.js must keep the pure/wiring split');
   return new Function(
-    `${pure}\nreturn { truncate, buildBody, issueUrl, fitIssue, defaultTitle, describeSnapshot };`,
+    `${pure}\nreturn { truncate, buildBody, issueUrl, fitIssue, defaultTitle, describeSnapshot,
+      SYMPTOMS, URL_BUDGET };`,
   )();
+}
+
+// The collector's helpers are plain functions over globals, so each can be
+// driven on its own with a stub document — no DOM implementation needed.
+function loadCollectorFunction(name, globals) {
+  const source = {
+    collectOverlays: scriptCollect.match(/function collectOverlays\(\) \{[\s\S]*?\n  \}/),
+    collectComponents: scriptCollect.match(/function collectComponents\(\) \{[\s\S]*?\n  \}/),
+  }[name];
+  assert.ok(source, `${name}() not found in collect-report.js`);
+  const names = Object.keys(globals);
+  return new Function(...names, `${source[0]}; return ${name};`)(...names.map((k) => globals[k]));
 }
 
 test('the report popup is wired into the manifest and ships its files', () => {
@@ -317,6 +330,7 @@ test('the prefilled issue URL is trimmed to fit GitHub, cutting page HTML before
   assert.ok(fitted.truncated, 'must report that the page HTML was cut, so the popup offers the full copy');
   assert.ok(fitted.body.includes(parts.description), 'the user’s own words must survive the trim');
   assert.ok(fitted.body.includes('1.2.3 (45)'), 'the version must survive the trim');
+  assert.ok(fitted.body.includes('{"scrollable": false}'), 'the page state must survive the trim');
 
   // A small report goes through untouched.
   const small = fitIssue('t', { ...parts, html: '<html>small</html>' }, 6000);
@@ -331,16 +345,115 @@ test('the prefilled issue URL is trimmed to fit GitHub, cutting page HTML before
   assert.ok(!buildBody({ ...parts, html: '' }).includes('<details>'));
 });
 
+test('an over-budget page HTML block is dropped WHOLE, with a note pointing at the clipboard copy', () => {
+  // A snapshot cut to fit is the top of <head> — link tags and meta, never the
+  // nag, which sits deep in <body>. It would spend the whole budget and still
+  // be undiagnosable, so the block goes entirely and the clipboard carries it.
+  const { fitIssue } = loadReportHelpers();
+  const parts = {
+    description: 'Overlay covered everything.',
+    environment: { 'Keep Scrolling': '1.2.3 (45)' },
+    pageState: '{"scrollable": false}',
+    html: `<html><head>${'<link rel="modulepreload" href="/a.js">'.repeat(4000)}</head></html>`,
+  };
+
+  const fitted = fitIssue('t', parts, 6000);
+  assert.ok(fitted.url.length <= 6000, `URL still ${fitted.url.length} chars`);
+  assert.ok(!fitted.body.includes('<details>'), 'no half a snapshot — the whole block goes');
+  assert.ok(!fitted.body.includes('modulepreload'), 'no page-HTML fragment may survive in the URL');
+  assert.ok(
+    /paste it here/i.test(fitted.body),
+    'the issue must say the HTML is on the clipboard and where to paste it — otherwise it reads ' +
+      'as a complete report that merely lacks a snapshot',
+  );
+
+  // The note is only for a report that HAD page HTML; opting out is not a
+  // pending paste.
+  const optedOut = fitIssue('t', { ...parts, html: '' }, 6000);
+  assert.ok(!/paste it here/i.test(optedOut.body), 'no paste note when the user opted out of the HTML');
+});
+
+test('sections are dropped in order: page HTML, then diagnostics, then page state', () => {
+  const { fitIssue } = loadReportHelpers();
+  const base = {
+    description: 'x',
+    environment: { 'Keep Scrolling': '1.2.3 (45)' },
+    pageState: '{"lock": "small"}',
+    diagnostics: `{"overlays": "${'d'.repeat(400)}"}`,
+    html: `<html>${'p'.repeat(1500)}</html>`,
+  };
+  // Measured section costs for this report, as prefilled-URL length:
+  // everything 2459, without the HTML 807, without the diagnostics too 304.
+
+  // A budget that fits everything but the HTML: the diagnostics stay.
+  const roomy = fitIssue('t', base, 1000);
+  assert.ok(!roomy.body.includes('<html>'), 'the HTML goes first');
+  assert.ok(roomy.body.includes('overlays'), 'diagnostics outlive the HTML');
+  assert.ok(roomy.body.includes('"lock": "small"'), 'page state outlives the diagnostics');
+  assert.ok(roomy.url.length <= 1000, `URL still ${roomy.url.length} chars`);
+
+  // Tighter: the diagnostics go too, the lock state stays.
+  const tight = fitIssue('t', base, 500);
+  assert.ok(!tight.body.includes('overlays'), 'diagnostics go before the page state');
+  assert.ok(tight.body.includes('"lock": "small"'), 'the lock state is the last structured part to go');
+  assert.ok(tight.url.length <= 500, `URL still ${tight.url.length} chars`);
+});
+
+test('the popup offers the common symptoms as a multi-select folded into title and body', () => {
+  const { SYMPTOMS, buildBody, defaultTitle } = loadReportHelpers();
+
+  // The three things the two nag scripts actually fail at, plus an escape hatch.
+  assert.deepEqual(SYMPTOMS.map((s) => s.id), ['nag', 'scroll', 'overlay', 'other']);
+  for (const symptom of SYMPTOMS) {
+    assert.ok(symptom.label && symptom.title, `symptom ${symptom.id} needs both a label and a title`);
+  }
+
+  const chosen = [SYMPTOMS[1], SYMPTOMS[2]];
+  const body = buildBody({ symptoms: chosen, environment: {}, description: '' });
+  for (const symptom of chosen) {
+    assert.ok(body.includes(`- ${symptom.label}`), `body must list the ticked symptom: ${symptom.label}`);
+  }
+  assert.ok(
+    !body.includes('_No description provided._'),
+    'ticked symptoms ARE the description — do not also claim there is none',
+  );
+
+  // The title follows the first ticked symptom, so a frozen page does not
+  // arrive titled "nag not removed".
+  assert.equal(defaultTitle('https://x.com/i/status/1', chosen), 'Page will not scroll on x.com');
+  assert.equal(defaultTitle('https://www.reddit.com/r/a/'), 'Nag not removed on reddit.com');
+
+  // Rendered from SYMPTOMS at runtime: the label a user taps and the line the
+  // issue gets must be one string, not two that drift apart.
+  assert.ok(/id="symptoms"/.test(reportHtml), 'popup needs the symptom container');
+  assert.ok(scriptReport.includes('function renderSymptoms'), 'the checkboxes are built from SYMPTOMS');
+  for (const symptom of SYMPTOMS) {
+    assert.ok(!reportHtml.includes(symptom.label), `symptom label duplicated into report.html: ${symptom.label}`);
+  }
+});
+
 test('the report names the build it came from and the state of the page', () => {
   const { describeSnapshot, defaultTitle } = loadReportHelpers();
-  const { environment, pageState } = describeSnapshot(
+  const { environment, pageState, diagnostics, samples } = describeSnapshot(
     {
       url: 'https://x.com/i/status/1',
       userAgent: 'Mozilla/5.0 (iPhone)',
       viewport: '390x844 @3x',
       scriptsActive: { reddit: false, x: true },
-      lock: { scrollable: false },
-      signatures: [{ selector: '[data-interaction^="app-store-obstruction"]', count: 1 }],
+      lock: {
+        scrollable: false,
+        elements: [
+          { element: 'html', present: true, class: '', style: '', computed: { overflow: 'visible' } },
+          { element: 'body', present: true, class: '', style: 'position: fixed', computed: { position: 'fixed' } },
+        ],
+      },
+      signatures: [{
+        selector: '[data-interaction^="app-store-obstruction"]',
+        count: 1,
+        sample: '<div data-interaction="app-store-obstruction"></div>',
+      }],
+      overlays: [{ coverage: 1, tag: '<div data-vaul-drawer="">' }],
+      components: ['bottom-prompt', 'vaul'],
     },
     { version: '1.2.3', build: '45' },
   );
@@ -349,6 +462,105 @@ test('the report names the build it came from and the state of the page', () => 
   assert.equal(environment['Page scrollable'], 'false');
   assert.ok(pageState.includes('app-store-obstruction'));
   assert.equal(defaultTitle('https://www.reddit.com/r/a/'), 'Nag not removed on reddit.com');
+
+  // Split into three so the URL trim can drop the bulky parts and keep the
+  // parts that always matter, smallest first. The lock and a selector→count
+  // tally stay in pageState; what is covering the page is in diagnostics; the
+  // sampled markup — a subset of the page HTML the clipboard carries anyway —
+  // is on its own in samples, where it is dropped first.
+  assert.ok(pageState.includes('"scrollable": false'), 'the lock state stays in the smallest block');
+  assert.ok(pageState.includes('"position": "fixed"'), 'the lock is flattened, not nested in "elements"');
+  assert.ok(!pageState.includes('"elements"'), 'the collector’s wrapper keys are not worth URL budget');
+  assert.ok(!pageState.includes('<div data-interaction'), 'samples do not belong in the kept block');
+
+  assert.ok(diagnostics.includes('data-vaul-drawer'), 'unrecognised overlays must reach the issue');
+  assert.ok(diagnostics.includes('bottom-prompt'), 'preloaded component names must reach the issue');
+  assert.ok(!diagnostics.includes('<div data-interaction'), 'samples are a separate, droppable tier');
+
+  assert.ok(samples.includes('<div data-interaction'), 'the matched markup goes in the bulky tier');
+});
+
+test('a realistic report keeps the lock state AND the overlay summary inside the real budget', () => {
+  // The regression this guards: a diagnostics block big enough to be dropped by
+  // fitIssue on every real page is the same as not collecting it at all. Sized
+  // against a logged-out X status page — long URL, long user agent, a modal
+  // over a backdrop over a banner, a page's worth of preloaded modules.
+  const { describeSnapshot, fitIssue, SYMPTOMS, URL_BUDGET } = loadReportHelpers();
+  const overlay = (name, text) => ({
+    coverage: 1,
+    position: 'fixed',
+    zIndex: '50',
+    pointerEvents: 'auto',
+    touchAction: 'none',
+    tag: `<div role="dialog" aria-modal="true" data-state="open" data-interaction="${name}" class="group fixed inset-0 z-50 flex touch-none items-center justify-center">`,
+    text,
+  });
+  const snapshot = {
+    url: 'https://x.com/SomeAccountName/status/1234567890123456789?s=46&t=AbCdEfGhIjKlMnOpQrSt',
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1',
+    viewport: '390x844 @3x',
+    scriptsActive: { reddit: false, x: true },
+    lock: {
+      scrollable: false,
+      elements: [
+        { element: 'html', present: true, class: '', style: '', computed: { overflow: 'visible', position: 'static', touchAction: 'auto', pointerEvents: 'auto' } },
+        { element: 'body', present: true, class: '', style: 'position: fixed; top: -1840px; left: 0px; right: 0px; height: auto;', computed: { overflow: 'visible', position: 'fixed', touchAction: 'auto', pointerEvents: 'auto' } },
+      ],
+    },
+    signatures: [{ selector: '[href*="launch_app_store=true"]', count: 12, sample: 'x'.repeat(1500) }],
+    overlays: [
+      overlay('app-store-obstruction', 'See this post in the app Use the app to view all comments and discover more posts.'),
+      overlay('app-store-obstruction-backdrop', ''),
+      overlay('bottom-prompt', 'Open X App See all the replies'),
+    ],
+    components: ['logged-out-open-app-banner', 'bottom-prompt', 'tap-hand', 'use-jetfuel-modal-state', 'modal', 'popover-sheet', 'vaul', 'use-may-obstruct'],
+  };
+
+  const { environment, pageState, diagnostics, samples } = describeSnapshot(snapshot, { version: '1.2.3', build: '45' });
+  const fitted = fitIssue('Page will not scroll on x.com', {
+    symptoms: [SYMPTOMS[1], SYMPTOMS[2]],
+    description: 'Nothing on screen but the page would not move.',
+    environment,
+    pageState,
+    diagnostics,
+    samples,
+    html: '<html>'.padEnd(200000, 'x'),
+  }, URL_BUDGET);
+
+  assert.ok(fitted.url.length <= URL_BUDGET, `URL ${fitted.url.length} over budget ${URL_BUDGET}`);
+  assert.ok(fitted.body.includes('### Page state'), 'the lock state must reach the issue');
+  assert.ok(
+    fitted.body.includes('### Overlays and components'),
+    'the overlay summary must reach the issue — dropped on every real page, it is dead weight',
+  );
+  assert.ok(fitted.body.includes('app-store-obstruction'), 'the overlay must still be named');
+  assert.ok(fitted.body.includes('logged-out-open-app-banner'), 'the component names must survive');
+  assert.ok(/paste it here/i.test(fitted.body), 'and the page HTML must be marked as pending a paste');
+});
+
+test('the overlay list is trimmed for the URL, since it has to survive the trim to be worth having', () => {
+  const { describeSnapshot } = loadReportHelpers();
+  const { diagnostics } = describeSnapshot(
+    {
+      overlays: Array.from({ length: 8 }, (unused, i) => ({
+        coverage: 1,
+        tag: `<div id="overlay-${i}" ${'data-x="y" '.repeat(60)}>`,
+        text: 'w'.repeat(500),
+      })),
+      components: ['vaul'],
+    },
+    { version: '1.2.3' },
+  );
+  const parsed = JSON.parse(diagnostics);
+  assert.equal(parsed.overlays.length, 3, 'only the biggest covers are worth the budget');
+  assert.ok(parsed.overlays[0].tag.length < 200, 'the opening tag is trimmed');
+  assert.ok(parsed.overlays[0].text.length < 120, 'the visible text is trimmed');
+  assert.ok(parsed.overlays[0].tag.includes('id="overlay-0"'), 'trimming keeps the identifying head of the tag');
+
+  // A page can only be so hostile: worst case this block plus the page state
+  // still leaves room inside URL_BUDGET, which is the whole point of trimming
+  // it here rather than letting fitIssue drop it.
+  assert.ok(diagnostics.length < 1500, `the kept tier must stay small, got ${diagnostics.length}`);
 });
 
 test('the captured HTML is stripped of scripts, styles and credential-shaped values', () => {
@@ -384,6 +596,127 @@ test('the captured HTML is stripped of scripts, styles and credential-shaped val
   // …while keeping the markup that a nag report is actually about.
   const nag = '<rpl-bottom-sheet blocking open id="app-upsell-blocking-bottom-sheet-seo"></rpl-bottom-sheet>';
   assert.equal(sanitizeHtml(nag), nag);
+});
+
+test('every <meta> content is redacted by default, not just credential-shaped names', () => {
+  // Matching on the name only ever caught the honest cases. The head is also
+  // where a page parks its CSP nonce, its Sentry trace/baggage ids, request ids
+  // and build hashes, under names no pattern predicts — and none of it helps
+  // diagnose a nag, so redacting the lot costs nothing.
+  const source = scriptCollect.match(/function sanitizeHtml\(html\) \{[\s\S]*?\n  \}/);
+  const sanitizeHtml = new Function(`${source[0]}; return sanitizeHtml;`)();
+
+  for (const markup of [
+    '<meta name="sentry-trace" content="s3cret">',
+    '<meta name="baggage" content="sentry-trace_id=s3cret">',
+    '<meta property="csp-nonce" content="s3cret">',
+    '<meta name="request-id" content="s3cret">',
+    '<meta name="build" content="s3cret">',
+    '<meta name="og:description" content="s3cret">',
+  ]) {
+    assert.ok(!sanitizeHtml(markup).includes('s3cret'), `sanitizeHtml left a value in: ${markup}`);
+  }
+
+  // A CSP nonce also rides on the tags themselves, wherever they appear.
+  assert.ok(!sanitizeHtml('<div nonce="s3cret"></div>').includes('s3cret'), 'nonce attributes must be redacted');
+
+  // The layout-describing handful survives — a nag that covers the viewport is
+  // occasionally a viewport-meta question.
+  const viewport = '<meta name="viewport" content="width=device-width, initial-scale=1">';
+  assert.equal(sanitizeHtml(viewport), viewport);
+  assert.equal(sanitizeHtml('<meta charset="utf-8">'), '<meta charset="utf-8">');
+});
+
+test('the collector names the unrecognised overlays covering the page', () => {
+  // "The whole page is obstructed" is only actionable if the report says WHAT
+  // is obstructing it. Every nag so far — Reddit's sheet, X's modal, X's vaul
+  // drawer — is a pinned element over a good part of the viewport.
+  const element = (outerHTML, computed, rect, textContent = '') => ({
+    outerHTML,
+    textContent,
+    computed,
+    getBoundingClientRect: () => rect,
+  });
+  const full = { width: 400, height: 800 };
+  const style = (over) => ({
+    position: 'fixed',
+    display: 'block',
+    visibility: 'visible',
+    opacity: '1',
+    zIndex: '50',
+    pointerEvents: 'auto',
+    touchAction: 'none',
+    ...over,
+  });
+
+  const elements = [
+    element('<div class="topbar">…</div>', style({ position: 'sticky' }), { width: 400, height: 40 }),
+    element('<div class="cookie">…</div>', style({ display: 'none' }), full),
+    element(
+      '<div role="dialog" data-interaction="app-store-obstruction" class="fixed inset-0"><p>x</p></div>',
+      style({}),
+      full,
+      '  See this post\n  in the app  ',
+    ),
+    element('<aside class="fixed bottom-0">…</aside>', style({ zIndex: '40' }), { width: 400, height: 200 }),
+  ];
+
+  const collectOverlays = loadCollectorFunction('collectOverlays', {
+    document: { body: { querySelectorAll: () => elements } },
+    window: { innerWidth: 400, innerHeight: 800 },
+    getComputedStyle: (el) => el.computed,
+    sanitizeHtml: (html) => html,
+    truncate: (text, limit) => (text || '').slice(0, limit),
+    OVERLAY_LIMIT: 8,
+    OVERLAY_MIN_COVERAGE: 0.1,
+    OVERLAY_SCAN_LIMIT: 8000,
+    TAG_LIMIT: 300,
+  });
+
+  const overlays = collectOverlays();
+  assert.equal(overlays.length, 2, 'small pinned chrome and hidden elements are not overlays');
+  assert.equal(overlays[0].coverage, 1, 'the biggest cover comes first');
+  assert.equal(
+    overlays[0].tag,
+    '<div role="dialog" data-interaction="app-store-obstruction" class="fixed inset-0">',
+    'report the opening tag only — the id/class/data-* a new selector gets built from',
+  );
+  assert.equal(overlays[0].text, 'See this post in the app', 'the visible words identify the nag');
+  assert.equal(overlays[1].coverage, 0.25);
+  assert.ok(overlays[0].touchAction === 'none' && overlays[0].pointerEvents === 'auto');
+});
+
+test('the collector reports the component names the page preloaded, hash-stripped', () => {
+  // `logged-out-open-app-banner-*.js` named X's banner and vaul's stylesheet
+  // named the scroll lock before either was ever matched in the DOM — and a
+  // few hundred bytes of names survive into an issue that page HTML cannot.
+  const link = (attrs) => ({ getAttribute: (name) => attrs[name] || null });
+  const collectComponents = loadCollectorFunction('collectComponents', {
+    document: {
+      querySelectorAll: () => [
+        link({ href: '/assets/logged-out-open-app-banner-D4f8Xq2b.js' }),
+        link({ href: '/assets/logged-out-open-app-banner-Zz91Ab77.js' }),
+        link({ src: 'https://abs.twimg.com/vaul-a1b2c3d4e5.js?v=2' }),
+        link({ src: '/bundle.js' }),
+      ],
+    },
+    COMPONENT_LIMIT: 60,
+  });
+
+  assert.deepEqual(collectComponents(), ['logged-out-open-app-banner', 'vaul', 'bundle'],
+    'strip the content hash so a redeploy does not read as a new component, and de-duplicate');
+});
+
+test('the collector still only reads the page after growing new diagnostics', () => {
+  for (const call of ['collectOverlays()', 'collectComponents()']) {
+    assert.ok(scriptCollect.includes(call), `collect() must gather ${call}`);
+  }
+  // getBoundingClientRect/getComputedStyle are reads; the read-only guard in
+  // the collector test above covers the mutation side.
+  assert.ok(
+    scriptCollect.includes('OVERLAY_SCAN_LIMIT'),
+    'the overlay scan must be capped — it touches every element on the page',
+  );
 });
 
 test('the collector reports whether the nag scripts ran at all', () => {

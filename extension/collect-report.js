@@ -7,7 +7,9 @@
 // listener and, when the report popup (report.html) asks, returns a snapshot of
 // the things that matter when a nag slips through: whether our content script
 // actually ran, the current scroll-lock state, which nag signatures are still
-// present, and a sanitized copy of the page HTML.
+// present, which pinned elements are covering the viewport that we did NOT
+// recognise, which components the page preloaded, and a sanitized copy of the
+// page HTML.
 //
 // Design notes:
 //  - Deliberately separate from block-reddit-nag.js / block-x-nag.js. Those two
@@ -34,11 +36,21 @@
 
   const COLLECT_MESSAGE = 'keep-scrolling:collect';
 
-  // Caps. The popup trims further to fit a prefilled URL; these just stop us
-  // from moving a multi-megabyte string across the message port.
-  const HTML_LIMIT = 120000;
+  // Caps. The prefilled URL is budgeted separately and much tighter (see
+  // report.js); these only stop us from moving a multi-megabyte string across
+  // the message port. The HTML limit is generous because the clipboard, not
+  // the URL, is what actually carries the page HTML to the issue — a snapshot
+  // cut off inside <head> is not something anyone can diagnose from.
+  const HTML_LIMIT = 400000;
   const SNIPPET_LIMIT = 1500;
   const ATTR_LIMIT = 400;
+  const TAG_LIMIT = 300;
+
+  // Pinned elements big enough to be "the thing covering the page".
+  const OVERLAY_LIMIT = 8;
+  const OVERLAY_MIN_COVERAGE = 0.1;
+  const OVERLAY_SCAN_LIMIT = 8000;
+  const COMPONENT_LIMIT = 60;
 
   // Union of both nag scripts' signatures, used read-only for reporting. Over-
   // matching here is harmless (nothing is removed), so it also includes the
@@ -52,6 +64,11 @@
     'a[download][href*="launch_app_store=true"]',
     '[href*="launch_app_store=true"]',
     '[data-href*="launch_app_store=true"]',
+    // Not a removal signature for either script — the drawer library X moved
+    // its logged-out prompts onto. Reported because a page locked by a drawer
+    // we have no selector for is exactly the case this reporter exists for.
+    '[data-vaul-drawer]',
+    '[data-vaul-overlay]',
   ];
 
   // The marker stylesheets the two nag scripts inject. Their presence is proof
@@ -82,7 +99,12 @@
   //     unredacted — hence the quote-aware attribute walk.
   function sanitizeHtml(html) {
     if (typeof html !== 'string') return '';
-    const credential = /token|csrf|auth|session|secret|password|apikey|api[-_]?key/i;
+    const credential = /token|csrf|auth|session|secret|password|apikey|api[-_]?key|nonce/i;
+    // The only <meta> tags whose content survives: they describe how the page
+    // lays itself out (occasionally relevant to a nag that covers the viewport)
+    // and can hold nothing user- or session-specific. Kept local to the
+    // function so it stays self-contained — the tests drive it on its own.
+    const keepMeta = /^(?:viewport|charset|color-scheme|theme-color|referrer|robots|generator)$/i;
     return html
       .replace(/(<script\b[^>]*>)[\s\S]*?(<\/script\b[^>]*>)/gi, '$1/*…*/$2')
       .replace(/(<style\b[^>]*>)[\s\S]*?(<\/style\b[^>]*>)/gi, '$1/*…*/$2')
@@ -90,10 +112,17 @@
       // Any attribute the site itself named after a credential.
       .replace(/\s([\w:-]+)="[^"]*"/g, (attribute, name) =>
         (credential.test(name) ? ` ${name}="…"` : attribute))
-      // <meta name="csrf-token" content="…">, where the credential-shaped name
-      // is on one attribute and the value on another (in either order).
-      .replace(/<meta\b(?:"[^"]*"|'[^']*'|[^>"'])*>/gi, (tag) =>
-        (credential.test(tag) ? tag.replace(/(\scontent=")[^"]*"/i, '$1…"') : tag))
+      // <meta content="…"> is redacted by DEFAULT, not just when the tag looks
+      // credential-shaped. Matching on the name only ever caught the honest
+      // cases (`csrf-token`): the head is also where a page parks its CSP
+      // nonce, its Sentry trace/baggage ids, request ids and build hashes,
+      // under names no pattern predicts. None of that helps diagnose a nag, so
+      // the exchange is free — keep the handful of tags that describe the
+      // page's layout and drop every other value.
+      .replace(/<meta\b(?:"[^"]*"|'[^']*'|[^>"'])*>/gi, (tag) => {
+        const name = (tag.match(/\s(?:name|property|http-equiv|itemprop)="([^"]*)"/i) || [, ''])[1];
+        return keepMeta.test(name.trim()) ? tag : tag.replace(/(\scontent=")[^"]*"/i, '$1…"');
+      })
       // Values typed into the page (search box, login form).
       .replace(/<input\b(?:"[^"]*"|'[^']*'|[^>"'])*>/gi, (tag) =>
         tag.replace(/(\svalue=")[^"]*"/i, '$1…"'))
@@ -149,6 +178,79 @@
     return found;
   }
 
+  // Every nag either script has had to remove — Reddit's blocking bottom
+  // sheet, X's app-store modal, X's vaul drawer — is a pinned element covering
+  // a good part of the viewport. Listing the pinned elements we did NOT
+  // recognise is what turns "the whole page is covered by something" into an
+  // actionable report: it names the unknown variant even when the page HTML is
+  // too big to travel with the issue.
+  function collectOverlays() {
+    const found = [];
+    const area = window.innerWidth * window.innerHeight;
+    if (!document.body || !area) return found;
+    let nodes;
+    try { nodes = document.body.querySelectorAll('*'); } catch { return found; }
+
+    const scanned = Math.min(nodes.length, OVERLAY_SCAN_LIMIT);
+    for (let i = 0; i < scanned; i += 1) {
+      const el = nodes[i];
+      let style;
+      try { style = getComputedStyle(el); } catch { continue; }
+      if (style.position !== 'fixed' && style.position !== 'sticky') continue;
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+
+      let rect;
+      try { rect = el.getBoundingClientRect(); } catch { continue; }
+      const coverage = (rect.width * rect.height) / area;
+      if (coverage < OVERLAY_MIN_COVERAGE) continue;
+
+      // The opening tag alone: id, classes and any data-* the site named the
+      // component after (`data-interaction`, `data-vaul-drawer`) — the parts a
+      // new selector would be built from, without the subtree's bulk.
+      const html = el.outerHTML || '';
+      const close = html.indexOf('>');
+      found.push({
+        coverage: Math.round(coverage * 100) / 100,
+        position: style.position,
+        zIndex: style.zIndex,
+        pointerEvents: style.pointerEvents,
+        touchAction: style.touchAction,
+        tag: truncate(sanitizeHtml(close === -1 ? html : html.slice(0, close + 1)), TAG_LIMIT),
+        text: truncate((el.textContent || '').replace(/\s+/g, ' ').trim(), 200),
+      });
+    }
+
+    found.sort((a, b) => b.coverage - a.coverage);
+    return found.slice(0, OVERLAY_LIMIT);
+  }
+
+  // The module names a page preloads are how both diagnoses in docs/ actually
+  // started: `logged-out-open-app-banner-*.js` named the banner component and
+  // `vaul`'s drawer stylesheet named the scroll lock, before either was
+  // matched in the DOM. They are a few hundred bytes, so they survive into the
+  // issue even when the page HTML does not.
+  function collectComponents() {
+    const names = new Set();
+    let nodes;
+    try {
+      nodes = document.querySelectorAll(
+        'link[rel="modulepreload"][href], link[rel="preload"][as="script"][href], script[src]',
+      );
+    } catch { return []; }
+
+    for (const node of nodes) {
+      const url = node.getAttribute('href') || node.getAttribute('src') || '';
+      const file = url.split(/[?#]/)[0].split('/').pop() || '';
+      // `logged-out-open-app-banner-D4f8Xq2b.js` → `logged-out-open-app-banner`:
+      // drop the extension, then the content hash, so the same component does
+      // not read as a new one on every deploy.
+      const name = file.replace(/\.[a-z]+$/i, '').replace(/[-.][A-Za-z0-9_]{8,}$/, '');
+      if (name) names.add(name);
+      if (names.size >= COMPONENT_LIMIT) break;
+    }
+    return [...names];
+  }
+
   function collect() {
     const root = document.documentElement;
     return {
@@ -164,6 +266,8 @@
       },
       lock: describeScrollLock(),
       signatures: collectSignatures(),
+      overlays: collectOverlays(),
+      components: collectComponents(),
       html: truncate(sanitizeHtml(root ? root.outerHTML : ''), HTML_LIMIT),
     };
   }

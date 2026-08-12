@@ -174,12 +174,14 @@ for why).
   suppresses the bounce — see `docs/x-nag-remover-plan.md`.
 
 ## Bug reporting (`extension/report.*`, `extension/collect-report.js`)
-A toolbar popup (Safari's **ᴀA** menu ▸ Keep Scrolling) lets a user describe a
-nag that got through and file it as a **prefilled GitHub issue** carrying the
-page URL, the shipped version, the scroll-lock state, which nag signatures are
-still in the DOM, and a sanitized copy of the page HTML. It exists because the
-maintenance loop for both scripts starts with "capture a fresh HTML snapshot",
-and iOS gives a user no way to do that. Full design: @docs/bug-reporting.md
+A toolbar popup (Safari's **ᴀA** menu ▸ Keep Scrolling) lets a user tick which
+of the known failures they saw, describe it, and file it as a **prefilled GitHub
+issue** carrying the page URL, the shipped version, the scroll-lock state, which
+nag signatures are still in the DOM, what is pinned over the viewport, which
+components the page preloaded, and a sanitized copy of the page HTML. It exists
+because the maintenance loop for both scripts starts with "capture a fresh HTML
+snapshot", and iOS gives a user no way to do that. Full design:
+@docs/bug-reporting.md
 
 - IMPORTANT: the extension **never uploads anything**. The final step is
   `tabs.create()` on `github.com/…/issues/new?title=…&body=…`; the user reads
@@ -195,10 +197,30 @@ and iOS gives a user no way to do that. Full design: @docs/bug-reporting.md
   is the normal case. `scriptsActive` (are `#rnr-style` / `#xnr-style` present?)
   is what separates "clean page" from "the extension never ran" — if either
   script ever renames its injected `<style>` id, update `SCRIPT_MARKERS`.
-- GitHub 414s on a long request line, so `fitIssue()` trims to
-  `URL_BUDGET = 6000` chars, cutting the page-HTML block *before* the user's
-  text, and the popup puts the untruncated report on the clipboard whenever it
-  had to cut. Keep that order.
+- The popup leads with a **multi-select of the three known failures** (nag still
+  visible / page will not scroll / overlay covers the page, plus "something
+  else"), because those are different bugs in different code and a tapped box
+  beats an empty text field. `SYMPTOMS` in `report.js` is the single source: the
+  checkboxes are rendered from it, and the tests fail if a label is copied into
+  `report.html`. The first ticked box also seeds the issue title.
+- IMPORTANT: the page HTML does NOT fit the prefilled URL and never will —
+  `URL_BUDGET = 6000` holds ~2 000 chars of report. The **clipboard is the
+  transport** for it. `fitIssue()` therefore drops whole sections (HTML →
+  signature samples → overlays/components → lock state → clip the text), never
+  a fragment of one: half a snapshot is the top of `<head>`, which spends the
+  budget and diagnoses nothing. When the HTML is dropped, the body says so in
+  its place and points at the clipboard — without that line the issue reads as
+  complete and nobody pastes. Keep the order, and keep the note.
+- The overlay/component block is deliberately trimmed (`ISSUE_OVERLAYS`,
+  `ISSUE_TAG_LIMIT`) so it *survives* that trim on a real page — a diagnostics
+  block dropped from every issue is the same as not collecting it. A test sizes
+  a realistic X-status-page report end to end and fails if it stops fitting.
+- IMPORTANT: `sanitizeHtml()` redacts the `content` of **every** `<meta>`, not
+  just credential-named ones. The head is where a page parks its CSP nonce,
+  Sentry trace/baggage ids, request ids and build hashes, under names no pattern
+  predicts — and meta content diagnoses no nag, so the allowlist
+  (`viewport`, `charset`, …) is tiny on purpose. `nonce` is in the
+  credential-attribute pattern for the same reason.
 - `sanitizeHtml()` is best-effort redaction, not a security boundary: a
   logged-in page's HTML contains that session's content. The popup compensates
   by showing the exact text before anything is sent and making the HTML block a
