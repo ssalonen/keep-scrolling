@@ -28,16 +28,61 @@ report.html ──▶ report.js ──(runtime message)──▶ collect-report.
                     └── tabs.create(github.com/…/issues/new?title=…&body=…)
 ```
 
-## Nothing is uploaded
-There is no API token, no POST, no third-party endpoint. The last step is
-opening GitHub's own new-issue form with `title` and `body` prefilled; the user
-reads the text and presses **Submit** themselves. The container app's "nothing
-leaves your device" claim survives intact — the user is the transport, and the
-one exception is spelled out on that screen.
+## What leaves the device, and what does not
+The issue is never filed on the user's behalf: the last step is opening
+GitHub's own new-issue form with `title` and `body` prefilled, and the user
+reads the text and presses **Submit** themselves. No token, no API call to
+GitHub.
 
-`test/extension.test.js` fails if `report.js` ever grows an `XMLHttpRequest`, a
-`POST`, a `sendBeacon`, an `Authorization` header, a second `fetch`, or any
-remote URL besides the issue form.
+**One thing is uploaded**, and this reverses an earlier rule that said nothing
+ever would. A GitHub issue body caps at 65 536 characters and cannot hold a
+page snapshot; a report without a snapshot cannot start the maintenance loop
+both nag scripts depend on. So the sanitized snapshot is POSTed to
+`https://paste.rs/` and the issue links to it.
+
+The trade is bounded deliberately:
+
+- it happens **only** on the file button, **only** with the *Upload it and link
+  from the issue* box ticked. Untick it and the old clipboard path is exactly
+  what happens instead;
+- the popup's preview — the consent step — shows a line saying the snapshot
+  *will be* uploaded, in the place the snapshot would occupy;
+- the checkbox names the service, says the link is readable by anyone who has
+  it, and says retention is not guaranteed;
+- the container app's privacy card says the same thing. All three must stay
+  truthful together.
+
+`test/extension.test.js` now pins the shape rather than forbidding the upload:
+exactly two `fetch` calls (the packaged `build-info.json` and the upload),
+exactly one `POST`, exactly two remote URLs (the issue form and the paste
+host), the endpoint as a single named constant matching `host_permissions`, and
+no `XMLHttpRequest`, `sendBeacon`, `Authorization` or `credentials:` anywhere.
+
+### Why paste.rs, and what it demands of the code
+Chosen over the alternatives because it takes a raw `POST` body with no account
+and no API key (a key baked into a public client is a shared secret), returns
+the URL as plain text, and supports `DELETE`. GitHub Gist was the obvious
+"reputable" option and is unusable: anonymous gists were removed in 2018.
+
+Four measured properties the code has to respect — none of them documented:
+
+- **393 216 bytes (384 KiB) is the ceiling.** Past it the host answers `206`
+  and stores the paste **cut from the front** — the one cut that loses a
+  late-injected nag. So `trimToBytes()` middle-cuts to fit *before* posting,
+  measuring **bytes**: a snapshot is not ASCII and a character count overshoots.
+  A `206` is still reported as partial in the issue.
+- **`/<id>.html` renders the paste as HTML.** Linking that would serve a
+  captured page from the host's origin, so the returned URL has any extension
+  stripped and is linked plain.
+- **No `Access-Control-Allow-Origin`, and `OPTIONS` 404s.** The request must
+  stay CORS-simple (`Content-Type: text/plain`), and `host_permissions` is what
+  lets the popup read the response at all.
+- **"Pasting is heavily rate limited."** Failure is expected, so every path
+  falls back to the clipboard with a status message rather than losing the
+  report.
+
+The response is validated before it reaches the issue body: only a URL on the
+host that was posted to, with no whitespace, is accepted.
 
 ## What the user is asked
 Three checkboxes and a text box. The checkboxes (`SYMPTOMS` in `report.js`) are
@@ -89,7 +134,13 @@ diagnostics block that gets dropped on every real page is the same as never
 having collected it. A test measures a realistic X-status-page report end to
 end and fails if the lock state or the overlay summary stops fitting.
 
-## The issue-body limit — the clipboard is bounded too
+## The issue-body limit — what the fallback still has to handle
+With the upload in place the snapshot travels as a link, and the trimming below
+applies only when the user unticks the upload box or the host is unreachable.
+It is still the path a report takes on a bad day, so it stays exercised and
+tested.
+
+
 The clipboard is the transport, but it is **not** an unbounded one. GitHub
 rejects an issue body over **65 536 characters** outright:
 
@@ -283,3 +334,22 @@ and be useless for bisecting a regression.
   X's cookie-consent banner. That is correct — it is read-only reporting, not
   removal — but a reader of an issue should not mistake the list for a list of
   things to remove.
+- **The upload has never run on a device.** Its HTTP behaviour was verified
+  with `curl` and the popup flow with a stubbed network, but whether Safari on
+  iOS lets an extension popup read a cross-origin response under
+  `host_permissions` — from a host that sends no CORS headers — is exactly the
+  kind of thing Safari differs on. If it fails, the symptom is the clipboard
+  fallback firing every time, which is survivable but silent about *why*; the
+  status line says "Upload failed" and no more.
+- **Retention is undocumented.** paste.rs states no expiry policy, so a link in
+  an old issue may or may not resolve months later. The issue text says as much
+  rather than implying permanence. If snapshots start disappearing before they
+  are acted on, the answer is to attach them to the issue instead — or to go
+  back to compressing them into the body (gzip+base64 measured at ~4.7× on
+  prose HTML, likely 6–10× on app markup, i.e. roughly 300–450 KB inside the
+  65 536-character limit).
+- **Third-party exposure.** The snapshot is sanitized best-effort, and a
+  logged-in page's HTML still contains that session's content. Uploading it
+  puts that on someone else's server, readable by anyone with the link, in
+  addition to the GitHub issue being public. That is the deliberate trade for
+  getting a whole snapshot; the checkbox is how a user declines it.

@@ -18,6 +18,7 @@
     }
   },
   "permissions": ["activeTab"],
+  "host_permissions": ["https://paste.rs/"],
   "content_scripts": [
     {
       "matches": ["*://*.reddit.com/*"],

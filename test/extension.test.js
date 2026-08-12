@@ -269,6 +269,46 @@ test('the report popup is wired into the manifest and ships its files', () => {
   assert.ok(reportHtml.trim() && scriptReport.trim(), 'popup page and script must be non-empty');
 });
 
+test('the uploaded snapshot is trimmed to the host’s byte ceiling, and linked as plain text', () => {
+  // Two measured properties of the paste host this code must respect:
+  //  - over 393 216 bytes it answers 206 and stores a copy cut from the FRONT,
+  //    which is the one cut that loses a late-injected nag. So trim first, by
+  //    BYTES: a page snapshot is not ASCII and a character count overshoots.
+  //  - `<id>.html` makes it RENDER the captured page. The link must stay
+  //    extension-less so the snapshot is served as text.
+  const source = scriptReport.match(/function trimToBytes\(html, maxBytes\) \{[\s\S]*?\n\}/);
+  assert.ok(source, 'trimToBytes() not found in report.js');
+  const trimMiddleSource = scriptReport.match(/function trimMiddle\(html, keep\) \{[\s\S]*?\n\}/)[0];
+  const trimToBytes = new Function(
+    'HTML_HEAD_SHARE',
+    `${trimMiddleSource}\n${source[0]}\nreturn trimToBytes;`,
+  )(0.25);
+
+  const multibyte = `<html>${'☃'.repeat(200000)}<div id="nag"></div></html>`;
+  assert.ok(new TextEncoder().encode(multibyte).length > 393216, 'fixture must exceed the ceiling');
+  const trimmed = trimToBytes(multibyte, 393216);
+  assert.ok(
+    new TextEncoder().encode(trimmed).length <= 393216,
+    'must measure BYTES — a char-count trim overshoots on multibyte content and gets a 206',
+  );
+  assert.ok(trimmed.endsWith('<div id="nag"></div></html>'), 'the end of the document must survive');
+  assert.equal(trimToBytes('<html>tiny</html>', 393216), '<html>tiny</html>', 'small pages untouched');
+
+  assert.equal(scriptReport.match(/const UPLOAD_MAX_BYTES = (\d+)/)[1], '393216');
+  assert.ok(
+    /replace\(\/\\\.\[a-z0-9\]\+\$\/i, ''\)/.test(scriptReport),
+    'the returned URL must have any extension stripped — .html would render the captured page',
+  );
+  assert.ok(
+    /text\.startsWith\(SNAPSHOT_ENDPOINT\)/.test(scriptReport),
+    'only a URL on the host we posted to may reach the issue body',
+  );
+  assert.ok(
+    /response\.status === 206/.test(scriptReport),
+    '206 means the host truncated the paste — the issue must say so',
+  );
+});
+
 test('the collector runs on the same hosts as the nag scripts and only reads the page', () => {
   const cs = manifest.content_scripts.find((entry) => entry.js?.includes('collect-report.js'));
   assert.ok(cs, 'collector content script entry missing');
@@ -301,19 +341,78 @@ test('the popup page keeps its JS in a separate file and loads nothing remote', 
   assert.ok(!/https?:\/\//.test(reportHtml), 'popup page must not reference a remote URL');
 });
 
-test('the reporter never uploads anything by itself', () => {
-  // The whole design: compose text, hand it to github.com's own new-issue form,
-  // let the user read it and press Submit. No token, no endpoint, no POST.
+test('the reporter sends to exactly one endpoint, and never submits the issue itself', () => {
+  // The reporter now uploads the page snapshot — a GitHub issue body caps at
+  // 65 536 characters and cannot hold one. That is a deliberate reversal of the
+  // old "nothing is ever uploaded" rule, so these guards pin down what it may
+  // do rather than forbidding it outright: ONE known endpoint, no credentials,
+  // no back-channel, and the issue still submitted by the user by hand.
   const code = scriptReport.replace(/^\s*\/\/.*$/gm, '');
-  for (const upload of ['XMLHttpRequest', 'POST', 'navigator.sendBeacon', 'Authorization']) {
-    assert.ok(!code.includes(upload), `the reporter must not transmit reports itself (found ${upload})`);
+  for (const banned of ['XMLHttpRequest', 'navigator.sendBeacon', 'Authorization', 'credentials:']) {
+    assert.ok(!code.includes(banned), `the reporter must not grow a back-channel (found ${banned})`);
   }
-  // The only network-shaped call is reading our own packaged build-info.json.
-  assert.equal((code.match(/\bfetch\(/g) || []).length, 1, 'exactly one fetch, for a packaged file');
-  assert.ok(code.includes("fetch(api.runtime.getURL('build-info.json'))"));
-  const urls = code.match(/https?:\/\/[^\s'"`)]+/g) || [];
-  assert.deepEqual(urls, ['https://github.com/${REPO}/issues/new'], 'the only remote URL is the issue form');
+
+  // Two fetches, both accounted for: the packaged build info, and the upload.
+  assert.equal((code.match(/\bfetch\(/g) || []).length, 2, 'exactly two fetches');
+  assert.ok(code.includes("fetch(api.runtime.getURL('build-info.json'))"), 'one reads a packaged file');
+  assert.ok(/fetch\(SNAPSHOT_ENDPOINT, \{/.test(code), 'the other is the snapshot upload');
+
+  // Exactly one POST, to the named constant — never to github.com, which would
+  // mean filing the issue on the user's behalf without them reading it.
+  assert.equal((code.match(/method: 'POST'/g) || []).length, 1, 'exactly one POST');
+  const urls = [...new Set(code.match(/https?:\/\/[^\s'"`)]+/g) || [])].sort();
+  assert.deepEqual(
+    urls,
+    ['https://github.com/${REPO}/issues/new', 'https://paste.rs/'],
+    'the only remote URLs are the issue form and the snapshot host',
+  );
   assert.ok(code.includes("const REPO = 'ssalonen/keep-scrolling'"), 'issues must go to this repo');
+  assert.ok(
+    code.includes("const SNAPSHOT_ENDPOINT = 'https://paste.rs/'"),
+    'the upload target must be a single named constant, not built at runtime',
+  );
+});
+
+test('the upload host is declared in the manifest and matches the endpoint', () => {
+  // Without host_permissions the popup cannot read the response: the host
+  // sends no Access-Control-Allow-Origin and answers OPTIONS with 404.
+  assert.deepEqual(manifest.host_permissions, ['https://paste.rs/']);
+  assert.deepEqual(manifest.permissions, ['activeTab'], 'no permission creep beyond the upload host');
+  const endpoint = scriptReport.match(/const SNAPSHOT_ENDPOINT = '([^']+)'/)[1];
+  assert.ok(
+    manifest.host_permissions.includes(endpoint),
+    'the declared host and the endpoint the code posts to must not drift apart',
+  );
+});
+
+test('the upload is opt-in, previewed, and degrades to the clipboard when it fails', () => {
+  // The upload is the one thing that leaves the device, so it may only happen
+  // from the file button, with a box the user can untick, and it must never
+  // cost the report when the host rate-limits or is down.
+  assert.ok(/id="upload-html"/.test(reportHtml), 'the popup needs the upload opt-out');
+  assert.ok(/paste\.rs/.test(reportHtml), 'the checkbox must name the service it uploads to');
+  assert.ok(
+    /const willUpload = \(\) =>[\s\S]*?uploadHtml\.checked/.test(scriptReport),
+    'uploading must be gated on the checkbox',
+  );
+  assert.ok(
+    /catch \{\s*status\.textContent = 'Upload failed/.test(scriptReport),
+    'a failed upload must fall back, not throw away the report',
+  );
+  // The preview is the consent step: it must say the snapshot will be sent.
+  assert.ok(
+    scriptReport.includes('htmlPending'),
+    'the preview must show a pending-upload line in place of the snapshot',
+  );
+});
+
+test('the container app tells the truth about what leaves the device', () => {
+  // app/Main.html is the only screen a user sees, and it used to promise that
+  // nothing is ever uploaded. If the reporter uploads, that page must say so.
+  const claimsAbsolutePrivacy = /<h3>Nothing leaves your device<\/h3>/.test(appHtml);
+  assert.ok(!claimsAbsolutePrivacy, 'the unqualified claim is no longer true — qualify it');
+  assert.ok(/paste\.rs/.test(appHtml), 'the privacy card must name the upload service');
+  assert.ok(/bug/i.test(appHtml), 'and must tie the upload to filing a bug report');
 });
 
 test('the prefilled issue URL is trimmed to fit GitHub, cutting page HTML before the user text', () => {
@@ -478,6 +577,38 @@ test('the report names the build it came from and the state of the page', () => 
   assert.ok(!diagnostics.includes('<div data-interaction'), 'samples are a separate, droppable tier');
 
   assert.ok(samples.includes('<div data-interaction'), 'the matched markup goes in the bulky tier');
+});
+
+test('an uploaded snapshot turns the issue into a small, complete body with a link', () => {
+  // The point of uploading: the report stops being a trimmed fragment plus a
+  // paste instruction, and becomes a short body linking the whole snapshot.
+  const { buildBody, fitIssue, URL_BUDGET } = loadReportHelpers();
+  const parts = {
+    symptoms: [{ label: 'The page will not scroll' }],
+    description: 'It froze.',
+    environment: { 'Keep Scrolling': '1.2.3 (45)' },
+    pageState: '{"scrollable": false}',
+    diagnostics: '{"overlays": []}',
+    html: '',
+    htmlLink: 'https://paste.rs/AbC12',
+  };
+
+  const body = buildBody(parts);
+  assert.ok(body.includes('](https://paste.rs/AbC12)'), 'the issue must link the uploaded snapshot');
+  assert.ok(!/paste it here/i.test(body), 'no paste instruction when the snapshot is linked');
+  assert.ok(!body.includes('<details><summary>Page HTML'), 'the inline block is redundant with a link');
+
+  const fitted = fitIssue('Page will not scroll on x.com', parts, URL_BUDGET);
+  assert.equal(fitted.truncated, false, 'a linked report fits the prefilled URL whole');
+  assert.ok(fitted.body.includes('https://paste.rs/AbC12'));
+  assert.ok(fitted.body.includes('{"overlays": []}'), 'and the diagnostics now fit alongside it');
+
+  // A partial upload must be labelled, or the snapshot looks complete.
+  assert.ok(/middle was cut/i.test(buildBody({ ...parts, htmlPartial: true })));
+
+  // The pending state is what the preview shows before anything is sent.
+  const pending = buildBody({ ...parts, htmlLink: '', htmlPending: true });
+  assert.ok(/will be uploaded/i.test(pending), 'the preview must disclose the upload before it happens');
 });
 
 test('the clipboard copy fits GitHub’s hard 65536-character issue body', () => {
