@@ -296,8 +296,14 @@ test('the uploaded snapshot is trimmed to the host’s byte ceiling, and linked 
 
   assert.equal(scriptReport.match(/const UPLOAD_MAX_BYTES = (\d+)/)[1], '393216');
   assert.ok(
-    /replace\(\/\\\.\[a-z0-9\]\+\$\/i, ''\)/.test(scriptReport),
+    scriptReport.includes("path.lastIndexOf('.')") && scriptReport.includes('path.slice(0, dot)'),
     'the returned URL must have any extension stripped — .html would render the captured page',
+  );
+  // …and stripped without a trailing-quantifier regex: run over a network
+  // response, that is quadratic in the input (js/polynomial-redos).
+  assert.ok(
+    !/\+\$\/[a-z]*\s*,/.test(scriptReport.slice(scriptReport.indexOf('async function uploadSnapshot'))),
+    'no `+$` regex may be applied to the upload response',
   );
   assert.ok(
     /parsed\.origin\}\/` !== SNAPSHOT_ENDPOINT/.test(scriptReport),

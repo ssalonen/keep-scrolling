@@ -435,10 +435,17 @@ async function uploadSnapshot(html) {
     throw new Error('unexpected upload response');
   }
 
+  // Extension stripped: `<id>.html` makes paste.rs RENDER the captured page
+  // instead of serving it as text. Done with lastIndexOf rather than a
+  // `/\.[a-z0-9]+$/` replace: a trailing-quantifier regex run over data that
+  // came back from the network is quadratic in the input length, which is a
+  // code-scanning finding (js/polynomial-redos) as well as a real, if small,
+  // way for the host to waste the popup's main thread.
+  const path = parsed.pathname;
+  const dot = path.lastIndexOf('.');
+
   return {
-    // Extension stripped: `<id>.html` makes paste.rs RENDER the captured page
-    // instead of serving it as text.
-    url: `${parsed.origin}${parsed.pathname.replace(/\.[a-z0-9]+$/i, '')}`,
+    url: `${parsed.origin}${dot > 0 ? path.slice(0, dot) : path}`,
     // 206 means the host truncated it; a client-side trim means we did.
     partial: response.status === 206 || body !== html,
   };
