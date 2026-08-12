@@ -107,17 +107,27 @@ is rewritten in the *generated* project by `apply_build_info` (Fastfile) with
 the release version and CI build number; `verify_ipa` then asserts the shipped
 appex really carries them.
 
-Getting the file into the generated project at all took a second step. Apple's
-converter copies what the **manifest** points at, and nothing points at this
-file — `report.js` names it only at runtime, through `runtime.getURL`. So the
-first release attempt died in `apply_build_info` with *"Expected exactly 1
-build-info.json … found 0"*. Declaring it in `web_accessible_resources` would
-have made the converter copy it, at the cost of exposing it to every page for
-no other reason; instead `sync_extension_resources` copies in — and registers
-with `xcodeproj` — whatever the converter left behind, treating `extension/` as
-the contract. Copying alone would not be enough: an unreferenced file is not
-bundled, which is the same trap `apply_app_ui` avoids by overwriting the
-template's own files in place. `manifest.json`'s own `version` is deliberately left
+Finding the file to stamp took two failed releases to get right. The first
+attempt globbed `build/gen` for it and died with *"Expected exactly 1
+build-info.json … found 0"*; the fix for that globbed for `manifest.json`
+instead, and died the same way — on a file every shipped IPA contains.
+
+That second failure is the diagnosis: **the generated project holds no copy of
+`extension/` at all.** It references the tracked directory, so nothing under
+`build/gen` was ever going to match. (A symlinked `Resources` would look the
+same from the outside: `Dir.glob "**"` does not descend into symlinked
+directories, and neither does `Find.find`.)
+
+So `sync_extension_resources` stopped searching the filesystem and asks the
+appex target's Copy Bundle Resources phase where its resources come from —
+either a folder reference to a directory holding `manifest.json`, or a per-file
+reference to `manifest.json` itself. If that resolves outside `build/gen`, the
+tree is copied to `build/gen/ExtensionResources` and every reference into it is
+repointed, because stamping a version through a reference to the tracked file
+would rewrite the working tree on a dev machine. Anything the project never
+registered is then copied in and registered with `xcodeproj` — copying alone
+would not be enough, since an unreferenced file is never bundled, the same trap
+`apply_app_ui` avoids by overwriting the template's own files in place. `manifest.json`'s own `version` is deliberately left
 alone — the converter reads it on the way to `Info.plist`, which
 `generate_project` repoints at the build settings, and rewriting it after
 conversion would leave the two disagreeing.

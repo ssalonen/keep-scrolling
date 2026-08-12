@@ -173,26 +173,42 @@ it has to fix six things the converter gets wrong or leaves unset:
    (`/^Version\s/`) instead of comparing against the token. `test/extension.test.js`
    enforces the "exactly once" rule.
 
-6. **Resources it cannot see.** The converter copies what the **manifest**
-   points at — the content scripts, the icons, the popup page — not the
-   `extension/` folder wholesale. A file named only at runtime is invisible to
-   it: `report.js` reads `build-info.json` through `runtime.getURL`, no manifest
-   entry mentions it, and the v0.6.0 release duly failed in `apply_build_info`
-   with *"Expected exactly 1 build-info.json … found 0"*.
+6. **The extension is referenced, not copied.** Two releases failed on the
+   assumption that `build/gen` contains the extension's own files:
 
-   The cheap fix — listing it in `web_accessible_resources` so the converter
-   notices it — would expose the file to every page just to get it copied.
-   `sync_extension_resources` instead treats `extension/` as the contract:
-   anything missing from the generated appex's `Resources` is copied in and
-   **registered with `xcodeproj`**. That second half matters, and it is the same
-   lesson as (5) from the other side — a file that is merely copied into the
-   generated tree is not bundled, and `apply_app_ui` only escapes it by
-   overwriting a file the template already references.
+   - **v0.6.0** — `apply_build_info` globbed `build/gen` for `build-info.json`
+     and found none. `report.js` reads that file through `runtime.getURL`, so
+     no manifest entry names it, which made "the converter only copies what the
+     manifest points at" a plausible story.
+   - **v0.6.1** — the same glob for `manifest.json` found none *either*. That
+     one is not explicable by manifest references: every shipped IPA contains
+     it. The generated project simply keeps **no copy of `extension/`** — it
+     references the tracked directory.
 
-   The converter could equally reference its `Resources` as a *folder*, where
-   the copy alone suffices and an added reference would give two build rules the
-   same output. `register_resource` asks the project which shape it emitted
-   rather than assuming, so both are handled and a second pass is a no-op.
+   `Dir.glob "**"` also does not descend into symlinked directories (nor does
+   `Find.find`), so a symlinked `Resources` is indistinguishable from an absent
+   one by search. Either way the conclusion is the same: **the filesystem under
+   `build/gen` is not where the appex's resources live, and the project is the
+   only authoritative source for that path.**
+
+   `sync_extension_resources` therefore reads the appex target's Copy Bundle
+   Resources phase, accepting either shape the converter might emit — a folder
+   reference to a directory containing `manifest.json`, or a per-file reference
+   to `manifest.json` itself. When that resolves outside `build/gen`, the tree
+   is copied to `build/gen/ExtensionResources` and every reference into it is
+   repointed, so stamping the version cannot rewrite a tracked file (which would
+   dirty the working tree on a dev machine and make the build non-reproducible).
+
+   Anything the project never registered is then copied in and **registered with
+   `xcodeproj`**. That half matters for the same reason as (5) from the other
+   side: a file merely copied into the generated tree is not bundled, and
+   `apply_app_ui` only escapes it by overwriting a file the template already
+   references. A second pass is a no-op, and a folder reference is left alone
+   rather than given a duplicate per-file reference.
+
+   `apply_build_info` is now handed that directory instead of searching for the
+   file, and refuses outright if the path it is about to stamp resolves to the
+   tracked `extension/build-info.json`.
 
 Patching a generated project is safe **because it is a build artifact** under
 `build/gen`, regenerated from scratch every run. This is the opposite of the bug

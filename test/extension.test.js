@@ -405,8 +405,8 @@ test('build-info.json is stamped at build time and verified in the IPA', () => {
 
   assert.ok(/def apply_build_info/.test(fastfile), 'apply_build_info must exist');
   assert.ok(
-    /^\s*apply_build_info\(marketing_version, build_number\)$/m.test(fastfile),
-    'apply_build_info must actually be called from generate_project',
+    /^\s*apply_build_info\(ext_resources, marketing_version, build_number\)$/m.test(fastfile),
+    'apply_build_info must be called from generate_project, with the resolved resources directory',
   );
   assert.ok(
     fastfile.includes(`grep -q '"version": "#{marketing_version}"'`),
@@ -420,22 +420,20 @@ test('build-info.json is stamped at build time and verified in the IPA', () => {
 });
 
 test('the Fastfile bundles extension files the manifest never names', () => {
-  // The converter copies what the MANIFEST points at. build-info.json is named
-  // only in report.js's runtime.getURL, so it was absent from the generated
-  // project entirely and failed a release in apply_build_info. Nothing in
-  // extension/ may depend on being manifest-referenced to ship.
+  // build-info.json is named only in report.js's runtime.getURL, so it cannot
+  // rely on being a manifest resource to ship. Nothing in extension/ may.
   const named = JSON.stringify(manifest);
   assert.ok(!named.includes('build-info.json'), 'build-info.json is deliberately not a manifest resource');
 
   assert.ok(/def sync_extension_resources/.test(fastfile), 'sync_extension_resources must exist');
   assert.ok(
-    /^\s*sync_extension_resources\(proj, ext\)$/m.test(fastfile),
-    'sync_extension_resources must actually be called from generate_project, with the appex target',
+    /^\s*ext_resources = sync_extension_resources\(proj, ext\)$/m.test(fastfile),
+    'sync_extension_resources must be called from generate_project and its resources dir captured',
   );
-  // Ordering: the stamp reads the copy the sync is responsible for putting there.
+  // Ordering: the stamp writes into the copy the sync is responsible for making.
   assert.ok(
     fastfile.indexOf('sync_extension_resources(proj, ext)') <
-      fastfile.indexOf('apply_build_info(marketing_version, build_number)'),
+      fastfile.indexOf('apply_build_info(ext_resources,'),
     'sync_extension_resources must run before apply_build_info',
   );
   // Copying is only half of it — an unreferenced file is copied and then never
@@ -443,6 +441,28 @@ test('the Fastfile bundles extension files the manifest never names', () => {
   assert.ok(
     /def register_resource/.test(fastfile) && /resources_build_phase/.test(fastfile),
     'a copied-in file must also be registered in the target’s Copy Bundle Resources phase',
+  );
+});
+
+test('the Fastfile locates the appex resources via the project, not a build/gen glob', () => {
+  // Two releases died on globbing build/gen for a file the converter never put
+  // there: v0.6.0 on build-info.json, v0.6.1 on manifest.json itself. The
+  // generated project references the tracked extension/ (and `Dir.glob "**"`
+  // does not descend into a symlinked directory either), so the project — not
+  // the filesystem — is the only authoritative source for that path.
+  assert.ok(
+    !/Dir\.glob\(File\.join\(GEN_DIR, "\*\*", (BUILD_INFO_FILE|"manifest\.json")\)\)/.test(fastfile),
+    'do not search build/gen for the extension’s own files — ask the target’s resources build phase',
+  );
+  assert.ok(
+    /def locate_extension_resources/.test(fastfile),
+    'the resources directory must be resolved from the resources build phase',
+  );
+  // Stamping through a reference to the tracked tree would dirty the working
+  // tree on a dev machine, so the referenced tree is copied under build/gen first.
+  assert.ok(
+    /def privatise_extension_resources/.test(fastfile) && /File\.realpath/.test(fastfile),
+    'a project pointing at the tracked extension/ must be repointed at a build/gen copy',
   );
 });
 

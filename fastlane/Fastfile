@@ -201,12 +201,12 @@ def generate_project(marketing_version, build_number)
   app  = find_target(proj, "com.apple.product-type.application", "container app")
   ext  = find_target(proj, "com.apple.product-type.app-extension", "Safari extension appex")
 
-  # 0c. Copy in (and register) anything from extension/ the converter did not
-  #     recognise as a resource — see sync_extension_resources.
-  sync_extension_resources(proj, ext)
+  # 0c. Give the appex its own complete copy of extension/ under build/gen, and
+  #     find out where it actually takes its web resources from.
+  ext_resources = sync_extension_resources(proj, ext)
 
   # 0d. Stamp the version the bug reporter quotes (see apply_build_info).
-  apply_build_info(marketing_version, build_number)
+  apply_build_info(ext_resources, marketing_version, build_number)
 
   # 1. Bundle identifiers. The converter builds the container app's id from
   #    --bundle-identifier's PREFIX plus --app-name, not from
@@ -311,52 +311,139 @@ def apply_app_ui(marketing_version, build_number)
   UI.message("Applied container-app UI from app/: #{dests.values.map { |p| p.sub("#{GEN_DIR}/", '') }.join(', ')}")
 end
 
-# Make sure every file in extension/ actually reached the generated appex.
+# Give the appex a private, complete copy of extension/ under build/gen, and
+# return the directory it now takes its web resources from.
 #
-# The converter does NOT copy the extension folder wholesale: it copies what the
-# *manifest* points at (content scripts, icons, the popup page and what that page
-# references). A file named only at runtime is invisible to it — report.js reads
-# build-info.json through `runtime.getURL`, nothing in the manifest mentions it,
-# and the v0.6.0 release died in apply_build_info with "found 0" because of
-# exactly that. Declaring it in the manifest just to be copied would expose it as
-# a web-accessible resource for no other reason, so sync it here instead.
+# Two release failures came from guessing where those resources live:
 #
-# extension/ is the contract; whatever is missing gets copied in and registered,
-# rather than this guessing which files the converter happens to recognise. That
-# also covers the next runtime-only file someone adds (a popup asset, a data
-# table) without another failed release to discover it.
+#   v0.6.0 — apply_build_info globbed build/gen for build-info.json and found 0.
+#   v0.6.1 — the same glob for manifest.json also found 0, even though every
+#            shipped IPA demonstrably contains it.
+#
+# The second one is the diagnosis: the converter does not leave a copy of the
+# extension inside the generated project at all — the project *references*
+# extension/ (directly, or through a symlinked Resources directory, which
+# `Dir.glob "**"` does not descend into either). So nothing under build/gen was
+# ever going to match, and the fix is to stop searching the filesystem and ask
+# the project where the appex's resources actually come from.
+#
+# Once located, anything still pointing at the tracked extension/ is copied into
+# build/gen and the references are repointed at the copy. That is what makes
+# apply_build_info safe: stamping the version has to rewrite build-info.json,
+# and doing that through a reference to the tracked file would dirty the working
+# tree on a dev machine and make the build non-reproducible. It also lets the
+# copy carry files the converter never registered — build-info.json is named
+# nowhere but in report.js's `runtime.getURL`, so a per-file reference list
+# cannot include it.
 def sync_extension_resources(proj, ext)
-  # Anchor on the generated manifest rather than deriving the appex's Resources
-  # path: the converter's layout is not a contract (same reasoning as
-  # apply_app_ui), but the manifest is always at the root of what it copied.
-  manifests = Dir.glob(File.join(GEN_DIR, "**", "manifest.json"))
-  if manifests.size != 1
-    UI.user_error!(
-      "Expected exactly 1 manifest.json in the generated project, found #{manifests.size}: " \
-      "#{manifests.inspect}. safari-web-extension-converter's output layout changed — update " \
-      "sync_extension_resources."
-    )
-  end
-  res_dir = File.dirname(manifests.first)
-
   sources = Dir.glob(File.join(EXTENSION_DIR, "*")).select { |p| File.file?(p) }.sort
   UI.user_error!("No files in #{EXTENSION_DIR} — there is no extension to ship") if sources.empty?
 
-  copied = sources.reject { |src| File.exist?(File.join(res_dir, File.basename(src))) }
-  copied.each do |src|
+  entries = ext.resources_build_phase.files.filter_map do |bf|
+    path = safe_real_path(bf.file_ref)
+    [bf.file_ref, path] unless path.nil?
+  end
+
+  res_dir = locate_extension_resources(entries)
+  if res_dir.nil?
+    UI.user_error!(
+      "Could not find the web extension's resources in #{ext.name}: no reference in its Copy Bundle " \
+      "Resources phase is manifest.json or a directory containing it. " \
+      "safari-web-extension-converter's output layout changed — update sync_extension_resources. " \
+      "Registered resources: #{entries.map(&:last).inspect}. Generated tree: #{gen_tree.inspect}"
+    )
+  end
+
+  res_dir = privatise_extension_resources(res_dir, entries) unless inside_gen_dir?(res_dir)
+
+  # Whatever the converter did not register — a runtime-only file — is copied in
+  # and added to the build phase. Copying alone would not ship it: an
+  # unreferenced file is never bundled, the same trap apply_app_ui avoids by
+  # overwriting files the template already references.
+  added = sources.reject { |src| bundled?(entries, File.join(res_dir, File.basename(src))) }
+  added.each do |src|
     dest = File.join(res_dir, File.basename(src))
-    FileUtils.cp(src, dest)
+    FileUtils.cp(src, dest) unless File.exist?(dest)
     register_resource(proj, ext, dest)
   end
 
-  if copied.empty?
-    UI.message("All #{sources.size} extension/ files were copied by the converter")
-  else
-    UI.important(
-      "The converter did not copy #{copied.map { |p| File.basename(p) }.join(', ')} from extension/ " \
-      "(no manifest reference points at them) — copied and registered them in #{ext.name}'s resources."
-    )
+  UI.message(
+    "#{ext.name} takes its web resources from #{res_dir.sub("#{GEN_DIR}/", 'build/gen/')}" +
+      (added.empty? ? "" : "; registered #{added.map { |p| File.basename(p) }.join(', ')}")
+  )
+  res_dir
+end
+
+# Where does this target's Copy Bundle Resources phase take the extension from?
+# Either a folder reference to a directory holding manifest.json, or a per-file
+# reference to manifest.json itself. Both shapes appear in the wild, and which
+# one the converter emits is not a contract.
+def locate_extension_resources(entries)
+  folder = entries.find { |(_, p)| File.directory?(p) && File.file?(File.join(p, "manifest.json")) }
+  return folder.last if folder
+
+  file = entries.find { |(_, p)| File.file?(p) && File.basename(p) == "manifest.json" }
+  file && File.dirname(file.last)
+end
+
+# Copy the referenced extension tree into build/gen and repoint every reference
+# that pointed into it. Resolves symlinks on the way in, so a symlinked
+# Resources directory becomes a real one we can write to.
+#
+# The generated project is a throwaway artifact built in place, so the repointed
+# references are absolute — no group-relative path to keep consistent.
+def privatise_extension_resources(res_dir, entries)
+  source = File.realpath(res_dir)
+  dest   = File.join(GEN_DIR, "ExtensionResources")
+  FileUtils.rm_rf(dest)
+  FileUtils.mkdir_p(dest)
+  FileUtils.cp_r(File.join(source, "."), dest)
+
+  moved = 0
+  entries.each_with_index do |(ref, path), i|
+    real = File.realpath(path)
+    next unless real == source || real.start_with?("#{source}#{File::SEPARATOR}")
+
+    repointed = File.join(dest, real.sub(/\A#{Regexp.escape(source)}#{File::SEPARATOR}?/, ""))
+    ref.source_tree = "<absolute>"
+    ref.path = repointed
+    entries[i] = [ref, repointed]
+    moved += 1
   end
+
+  UI.important(
+    "The generated project referenced #{source} — the tracked extension/ — rather than a copy of its " \
+    "own. Copied it to build/gen/ExtensionResources and repointed #{moved} reference(s), so stamping " \
+    "the build version cannot rewrite a tracked file."
+  )
+  dest
+end
+
+def inside_gen_dir?(path)
+  real = File.realpath(path)
+  gen  = File.realpath(GEN_DIR)
+  real == gen || real.start_with?("#{gen}#{File::SEPARATOR}")
+rescue StandardError
+  false
+end
+
+# What the generated project actually contains, for a layout-changed error.
+def gen_tree
+  Dir.glob(File.join(GEN_DIR, "**", "*"), File::FNM_DOTMATCH)
+     .reject { |p| File.basename(p).start_with?(".") }
+     .map { |p| p.sub("#{GEN_DIR}/", "") + (File.symlink?(p) ? " -> #{File.readlink(p)}" : "") }
+end
+
+def bundled?(entries, path)
+  entries.any? { |(_, p)| covers_path?(p, path) }
+end
+
+def safe_real_path(ref)
+  return nil unless ref.respond_to?(:real_path)
+
+  ref.real_path.to_s
+rescue StandardError
+  nil
 end
 
 # Add a file on disk to a target's Copy Bundle Resources phase.
@@ -371,24 +458,23 @@ end
 # the project which shape it emitted instead of assuming either.
 def register_resource(proj, target, path)
   phase = target.resources_build_phase
-  return if phase.files.any? { |bf| bundles_path?(bf.file_ref, path) }
+  return if phase.files.any? { |bf| covers_path?(safe_real_path(bf.file_ref), path) }
 
   # Keep the new reference next to its siblings in the navigator when they are
   # referenced individually; the group is cosmetic, the build phase is what ships.
-  sibling = proj.files.find { |f| bundles_path?(f, File.join(File.dirname(path), "manifest.json")) }
+  sibling = proj.files.find { |f| safe_real_path(f) == File.join(File.dirname(path), "manifest.json") }
   group = sibling&.parent || proj.main_group
-  phase.add_file_reference(group.new_reference(path))
+  ref = group.new_reference(path)
+  phase.add_file_reference(ref)
 end
 
-# Does this project reference already put `path` in the bundle — either as the
+# Does an existing reference already put `path` in the bundle — either as the
 # file itself, or as a folder reference containing it?
-def bundles_path?(ref, path)
-  return false unless ref.respond_to?(:real_path)
+def covers_path?(ref_path, path)
+  return false if ref_path.nil?
 
-  real = ref.real_path.to_s
-  real == path || (File.directory?(real) && path.start_with?("#{real}#{File::SEPARATOR}"))
-rescue StandardError
-  false
+  ref_path == path ||
+    (File.directory?(ref_path) && path.start_with?("#{ref_path}#{File::SEPARATOR}"))
 end
 
 # Stamp the shipped version into the extension's build-info.json.
@@ -398,23 +484,28 @@ end
 # the tracked copy carries placeholders, which is exactly what a local unstamped
 # build should report.
 #
-# This rewrites the *generated* copy (put there by the converter or by
-# sync_extension_resources) and never dirties the tracked file. Globbing for the
-# filename rather than deriving the Resources path follows apply_app_ui: the
-# converter's layout is not a contract.
-def apply_build_info(marketing_version, build_number)
+# It writes into the private copy sync_extension_resources just made under
+# build/gen, and is handed that directory rather than searching for the file:
+# globbing build/gen for it is exactly what failed in v0.6.0, because no copy of
+# the extension lives there until sync_extension_resources puts one there.
+def apply_build_info(res_dir, marketing_version, build_number)
   require "json"
 
-  matches = Dir.glob(File.join(GEN_DIR, "**", BUILD_INFO_FILE))
-  if matches.size != 1
+  path = File.join(res_dir, BUILD_INFO_FILE)
+  unless File.file?(path)
     UI.user_error!(
-      "Expected exactly 1 #{BUILD_INFO_FILE} in the generated project, found #{matches.size}: " \
-      "#{matches.inspect}. It ships in extension/ and sync_extension_resources copies it into the " \
-      "appex's Resources — without it every bug report would claim an unknown version."
+      "No #{BUILD_INFO_FILE} in #{res_dir} — sync_extension_resources should have copied it there " \
+      "from extension/. Without it every bug report would claim an unknown version."
+    )
+  end
+  if File.realpath(path) == File.realpath(File.join(EXTENSION_DIR, BUILD_INFO_FILE))
+    UI.user_error!(
+      "Refusing to stamp #{path}: it resolves to the tracked #{BUILD_INFO_FILE}, so the build would " \
+      "rewrite a file in the working tree. sync_extension_resources should have privatised it first."
     )
   end
 
-  File.write(matches.first, "#{JSON.pretty_generate('version' => marketing_version, 'build' => build_number)}\n")
+  File.write(path, "#{JSON.pretty_generate('version' => marketing_version, 'build' => build_number)}\n")
   UI.message("Stamped #{BUILD_INFO_FILE} with #{marketing_version} (#{build_number})")
 end
 
