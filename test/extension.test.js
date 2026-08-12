@@ -26,6 +26,10 @@ const appScript = (appHtml.match(/<script>([\s\S]*?)<\/script>/i) || [, ''])[1];
 // and plain string counting is what these checks actually need.
 const countOccurrences = (haystack, needle) => haystack.split(needle).length - 1;
 
+// A stand-in for what the paste host hands back, kept in one place so the
+// assertions about it never spell a URL out inside a substring test.
+const PASTE_LINK = 'https://paste.rs/AbC12';
+
 test('content script is syntactically valid', () => {
   // Throws on a syntax error; `new Function` never executes the body.
   assert.doesNotThrow(() => new Function(script));
@@ -603,17 +607,22 @@ test('an uploaded snapshot turns the issue into a small, complete body with a li
     pageState: '{"scrollable": false}',
     diagnostics: '{"overlays": []}',
     html: '',
-    htmlLink: 'https://paste.rs/AbC12',
+    htmlLink: PASTE_LINK,
   };
 
+  // countOccurrences rather than `body.includes(PASTE_LINK)`: a substring test
+  // against a URL literal reads to code scanning as a bypassable host check
+  // (js/incomplete-url-substring-sanitization) even here, where the string
+  // being searched is a markdown body and nothing is being authorized. Saying
+  // "the link appears once" is both what this means and not that shape.
   const body = buildBody(parts);
-  assert.ok(body.includes('](https://paste.rs/AbC12)'), 'the issue must link the uploaded snapshot');
+  assert.equal(countOccurrences(body, `](${PASTE_LINK})`), 1, 'the issue must link the uploaded snapshot');
   assert.ok(!/paste it here/i.test(body), 'no paste instruction when the snapshot is linked');
   assert.ok(!body.includes('<details><summary>Page HTML'), 'the inline block is redundant with a link');
 
   const fitted = fitIssue('Page will not scroll on x.com', parts, URL_BUDGET);
   assert.equal(fitted.truncated, false, 'a linked report fits the prefilled URL whole');
-  assert.ok(fitted.body.includes('https://paste.rs/AbC12'));
+  assert.equal(countOccurrences(fitted.body, PASTE_LINK), 1, 'the link survives into the prefilled URL');
   assert.ok(fitted.body.includes('{"overlays": []}'), 'and the diagnostics now fit alongside it');
 
   // A partial upload must be labelled, or the snapshot looks complete.
