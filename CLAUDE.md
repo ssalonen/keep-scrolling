@@ -183,12 +183,27 @@ because the maintenance loop for both scripts starts with "capture a fresh HTML
 snapshot", and iOS gives a user no way to do that. Full design:
 @docs/bug-reporting.md
 
-- IMPORTANT: the extension **never uploads anything**. The final step is
-  `tabs.create()` on `github.com/…/issues/new?title=…&body=…`; the user reads
-  the text and submits it. No token, no POST, no endpoint — the container app's
-  privacy claim depends on this staying true, and `test/extension.test.js`
-  fails on `XMLHttpRequest`, `POST`, `sendBeacon`, `Authorization`, a second
-  `fetch`, or any remote URL other than the issue form.
+- IMPORTANT: the extension uploads **exactly one thing to exactly one place**:
+  the sanitized page snapshot, POSTed to `https://paste.rs/` (`SNAPSHOT_ENDPOINT`),
+  so the issue can link it. This reversed the older "never uploads anything"
+  rule on purpose — a GitHub issue body caps at 65 536 chars and cannot hold a
+  snapshot. It happens only from the file button, only with the upload box
+  ticked, and the preview discloses it first. The issue itself is still never
+  submitted for the user: `tabs.create()` on
+  `github.com/…/issues/new?title=…&body=…` and they press Submit.
+  `test/extension.test.js` pins the shape — two `fetch`es (packaged
+  `build-info.json` + the upload), one `POST`, two remote URLs, endpoint ==
+  `host_permissions`, and no `XMLHttpRequest`/`sendBeacon`/`Authorization`/
+  `credentials:`. Three places state the trade — the checkbox, the preview, and
+  `app/Main.html`'s privacy card — and a test fails if the app page goes back
+  to claiming nothing ever leaves.
+- IMPORTANT: paste.rs facts the code depends on, all measured rather than
+  documented: **393 216 bytes** is the ceiling and past it the host answers
+  `206` and keeps the paste **cut from the front** (so `trimToBytes()`
+  middle-cuts by BYTES before posting); **`/<id>.html` renders** the paste, so
+  the link is stored extension-less; it sends **no CORS headers** and 404s
+  `OPTIONS`, so the request must stay CORS-simple and needs `host_permissions`;
+  and it is **heavily rate limited**, so every path degrades to the clipboard.
 - IMPORTANT: `collect-report.js` is **read-only**. It is a third content script
   precisely so a diagnostics bug cannot take the nag removal down with it; the
   tests fail if `.remove()`, `setAttribute`, `classList`, `appendChild` or

@@ -7,11 +7,19 @@
 // new-issue URL.
 //
 // Design notes:
-//  - Nothing is ever uploaded from here. There is no API token, no POST, no
-//    third-party endpoint: the last step is opening github.com's own
-//    /issues/new page with title+body in the query string, which the user then
-//    reads and submits themselves. That keeps the app's "nothing leaves your
-//    device" promise honest — the user is the transport.
+//  - The issue itself is never submitted from here: the last step is opening
+//    github.com's own /issues/new page with title+body in the query string,
+//    which the user reads and submits themselves. No token, no API call to
+//    GitHub.
+//  - ONE thing does leave the device, and only on the file button, only with
+//    the upload box ticked: the sanitized page snapshot is POSTed to
+//    SNAPSHOT_ENDPOINT and the issue links to it. This replaced the earlier
+//    "nothing is ever uploaded" rule deliberately — a GitHub issue body caps
+//    at 65 536 characters, which cannot hold a page snapshot, and a report
+//    without one cannot start the maintenance loop either script depends on.
+//    The trade is stated on the checkbox, in the preview, and in the container
+//    app's privacy section; keep all three truthful. Untick it and the old
+//    clipboard path is exactly what happens.
 //  - GitHub answers an over-long request line with 414, so the prefilled URL is
 //    budgeted (URL_BUDGET) and fitIssue() drops whole sections until it fits,
 //    page HTML first. The page HTML realistically never fits, so the full
@@ -29,6 +37,32 @@ const api = globalThis.browser || globalThis.chrome;
 const REPO = 'ssalonen/keep-scrolling';
 const NEW_ISSUE_URL = `https://github.com/${REPO}/issues/new`;
 const COLLECT_MESSAGE = 'keep-scrolling:collect';
+
+// The one endpoint this extension ever sends anything to, and only when the
+// user ticks the upload box and then presses the file button. A GitHub issue
+// body caps at 65 536 characters, which cannot hold a page snapshot, so the
+// snapshot goes here and the issue links to it.
+//
+// paste.rs: POST the raw bytes, get a URL back. No account, no API key, and
+// `DELETE <url>` removes a paste. Measured behaviour that this code depends on:
+//   - 201 CREATED  = the whole paste was stored;
+//   - 206 PARTIAL  = it exceeded the server limit and was stored TRUNCATED,
+//                    from the front — the same head-first cut that loses the
+//                    nag, so we pre-trim and still report a 206 as partial;
+//   - the ceiling is 393 216 bytes (384 KiB), measured, not documented;
+//   - "pasting is heavily rate limited", so failure is expected and must
+//     degrade to the clipboard rather than lose the report.
+const SNAPSHOT_ENDPOINT = 'https://paste.rs/';
+const UPLOAD_MAX_BYTES = 393216;
+
+// The shape of a paste path, anchored at both ends: `/AbC12`, optionally with
+// a format extension. Anchoring is the point — an unanchored check would pass
+// on any path that merely contains an id-like run.
+const PASTE_PATH = /^\/[A-Za-z0-9]{1,32}(\.[A-Za-z0-9]{1,8})?$/;
+
+// Retention is undocumented, so the issue says so rather than implying the
+// link is permanent.
+const UPLOAD_NOTE = 'uploaded by the reporter — public to anyone with the link, retention not guaranteed';
 
 // GitHub 414s on a long request line well before the 8 KB most servers allow;
 // stay comfortably under it, since the URL also has to survive being handed to
@@ -110,7 +144,8 @@ function formatEnvironment(env) {
 
 function buildBody(parts) {
   const {
-    symptoms, description, environment, pageState, diagnostics, samples, html, htmlNote, htmlOmitted,
+    symptoms, description, environment, pageState, diagnostics, samples,
+    html, htmlNote, htmlOmitted, htmlLink, htmlPending, htmlPartial,
   } = parts;
   const chosen = symptoms || [];
   const text = (description || '').trim();
@@ -143,7 +178,31 @@ function buildBody(parts) {
     );
   }
 
-  if (html) {
+  // The snapshot reaches the issue one of three ways, in descending order of
+  // usefulness: a link to the uploaded copy (whole page, nothing trimmed), the
+  // HTML inline (only what the budget allows), or a note saying it is on the
+  // clipboard. `htmlPending` is the preview's version of the first — the
+  // upload has not happened yet, and the preview must say what will be sent.
+  if (htmlLink) {
+    sections.push(
+      '',
+      '### Page HTML',
+      '',
+      `[Full sanitized page snapshot](${htmlLink}) — ${UPLOAD_NOTE}.`,
+    );
+    if (htmlPartial) {
+      sections.push('', '_The snapshot exceeded the paste host\'s size limit; the middle was cut._');
+    }
+    if (htmlNote) sections.push('', htmlNote);
+  } else if (htmlPending) {
+    sections.push(
+      '',
+      '### Page HTML',
+      '',
+      '_The page snapshot will be uploaded when you press “Open GitHub issue”, and linked here._',
+    );
+    if (htmlNote) sections.push('', htmlNote);
+  } else if (html) {
     sections.push(
       '',
       '<details><summary>Page HTML (sanitized)</summary>',
@@ -325,6 +384,73 @@ function describeSnapshot(snapshot, buildInfo) {
   return { environment, pageState, diagnostics, samples };
 }
 
+// The paste host's ceiling is in BYTES, and a page snapshot is not ASCII, so
+// trimming by character count would overshoot and hand back a 206 — a paste
+// silently cut from the front, which is the one cut that loses the nag.
+// Convert through the measured bytes-per-character ratio, then verify.
+function trimToBytes(html, maxBytes) {
+  const encoder = new TextEncoder();
+  if (encoder.encode(html).length <= maxBytes) return html;
+
+  const ratio = encoder.encode(html).length / html.length;
+  let keep = Math.floor(maxBytes / ratio) - 200;
+  let trimmed = trimMiddle(html, keep);
+  while (encoder.encode(trimmed).length > maxBytes && keep > 1000) {
+    keep = Math.floor(keep * 0.9);
+    trimmed = trimMiddle(html, keep);
+  }
+  return trimmed;
+}
+
+// The only outbound request this extension makes, and only from the file
+// button, after the user has ticked the upload box and seen the preview.
+// Returns the paste URL, or throws — every caller must be able to fall back to
+// the clipboard, because the host rate-limits aggressively.
+async function uploadSnapshot(html) {
+  const body = trimToBytes(html, UPLOAD_MAX_BYTES);
+  const response = await fetch(SNAPSHOT_ENDPOINT, {
+    method: 'POST',
+    // A simple content type on purpose: the host answers OPTIONS with 404 and
+    // sends no Access-Control-Allow-Origin, so anything that triggers a CORS
+    // preflight fails outright. The extension's host_permissions entry is what
+    // lets us read the response at all.
+    headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+    body,
+  });
+  if (!response.ok) throw new Error(`upload failed (${response.status})`);
+
+  const text = (await response.text()).trim();
+
+  // Never drop raw response text into an issue body — it becomes a markdown
+  // link in a public issue. Validate by PARSING rather than by substring: the
+  // origin must be exactly the host we posted to, and the path must be a bare
+  // paste id. A prefix test would accept anything the host chose to append.
+  let parsed;
+  try {
+    parsed = new URL(text);
+  } catch {
+    throw new Error('unexpected upload response');
+  }
+  if (`${parsed.origin}/` !== SNAPSHOT_ENDPOINT || !PASTE_PATH.test(parsed.pathname)) {
+    throw new Error('unexpected upload response');
+  }
+
+  // Extension stripped: `<id>.html` makes paste.rs RENDER the captured page
+  // instead of serving it as text. Done with lastIndexOf rather than a
+  // `/\.[a-z0-9]+$/` replace: a trailing-quantifier regex run over data that
+  // came back from the network is quadratic in the input length, which is a
+  // code-scanning finding (js/polynomial-redos) as well as a real, if small,
+  // way for the host to waste the popup's main thread.
+  const path = parsed.pathname;
+  const dot = path.lastIndexOf('.');
+
+  return {
+    url: `${parsed.origin}${dot > 0 ? path.slice(0, dot) : path}`,
+    // 206 means the host truncated it; a client-side trim means we did.
+    partial: response.status === 206 || body !== html,
+  };
+}
+
 // ── Popup wiring ────────────────────────────────────────────────────────────
 
 async function readBuildInfo() {
@@ -399,6 +525,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const descriptionField = document.getElementById('description');
   const symptomList = document.getElementById('symptoms');
   const includeHtml = document.getElementById('include-html');
+  const uploadHtml = document.getElementById('upload-html');
   const preview = document.getElementById('preview');
   const status = document.getElementById('status');
   const fileButton = document.getElementById('file');
@@ -429,7 +556,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     includeHtml.disabled = true;
   }
 
-  function parts() {
+  // Nothing to upload if there is no HTML in the report to begin with.
+  function syncUploadOption() {
+    uploadHtml.disabled = !includeHtml.checked || !snapshot.html;
+  }
+  syncUploadOption();
+
+  const willUpload = () => includeHtml.checked && uploadHtml.checked && !!snapshot.html;
+
+  function parts(extra) {
     return {
       symptoms: selectedSymptoms(),
       description: descriptionField.value,
@@ -439,6 +574,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       samples: snapshot.unreachable ? '' : samples,
       html: includeHtml.checked ? snapshot.html : '',
       htmlNote: '<sub>Scripts, styles, meta values, credential-shaped attributes and typed-in values were stripped before capture.</sub>',
+      ...extra,
     };
   }
 
@@ -452,10 +588,19 @@ document.addEventListener('DOMContentLoaded', async () => {
   // that gets rejected on submit with "Body can not be longer than 65536
   // characters", which is what shipping the untrimmed copy actually did.
   function refresh() {
-    const fitted = fitClipboard(parts(), BODY_BUDGET);
+    // When the snapshot is going to be uploaded it is not part of the body at
+    // all, so the preview shows the pending-upload line in its place. The
+    // preview is the consent step, and it has to say what will be sent — now
+    // something leaves the device before GitHub even opens.
+    const upload = willUpload();
+    const fitted = fitClipboard(
+      parts(upload ? { html: '', htmlPending: true } : {}), BODY_BUDGET,
+    );
     if (disclosure.open) preview.textContent = fitted.body;
     const size = `${fitted.body.length.toLocaleString()} characters`;
-    status.textContent = fitted.truncated ? `${size} — trimmed to fit a GitHub issue` : size;
+    status.textContent = fitted.truncated && !upload
+      ? `${size} — trimmed to fit a GitHub issue`
+      : size;
     return fitted.body;
   }
 
@@ -467,7 +612,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     clearTimeout(pending);
     pending = setTimeout(refresh, 150);
   });
-  includeHtml.addEventListener('change', refresh);
+  includeHtml.addEventListener('change', () => { syncUploadOption(); refresh(); });
+  uploadHtml.addEventListener('change', refresh);
   disclosure.addEventListener('toggle', refresh);
   symptomList.addEventListener('change', () => {
     if (!titleEdited) titleField.value = defaultTitle(snapshot.url, selectedSymptoms());
@@ -481,26 +627,56 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   fileButton.addEventListener('click', async () => {
-    const full = refresh();
+    refresh();
     const chosen = selectedSymptoms();
     const title = titleField.value.trim() || defaultTitle(snapshot.url, chosen);
-    const fitted = fitIssue(title, parts(), URL_BUDGET);
 
-    // Only what fits survives the URL, and the page HTML essentially never
-    // does. Put the whole report on the clipboard so the user can paste it in
-    // — the note in the issue body tells them to.
-    if (fitted.truncated) await copyText(full);
+    // Upload first, so the issue can carry a link to the whole snapshot
+    // instead of the fragment a URL or a clipboard paste can hold. The host
+    // rate-limits hard and can simply be down, so a failure here is expected
+    // and must not cost the report: fall back to the previous behaviour.
+    let uploaded = null;
+    if (willUpload()) {
+      fileButton.disabled = true;
+      status.textContent = 'Uploading the page snapshot…';
+      try {
+        uploaded = await uploadSnapshot(snapshot.html);
+      } catch {
+        status.textContent = 'Upload failed — putting the report on your clipboard instead.';
+      }
+      fileButton.disabled = false;
+    }
+
+    const reportParts = parts(uploaded
+      ? { html: '', htmlLink: uploaded.url, htmlPartial: uploaded.partial }
+      : {});
+    const fitted = fitIssue(title, reportParts, URL_BUDGET);
+
+    // What the clipboard gets, if it is needed. Built from reportParts rather
+    // than from the preview: the preview was showing the pending-upload line,
+    // which carries no snapshot at all — copying that after a failed upload
+    // would hand the user a report with the one thing they came for missing.
+    const clipboardCopy = () => fitClipboard(reportParts, BODY_BUDGET).body;
+
+    // With a link the body is complete on its own. Without one, only what fits
+    // survives the URL and the page HTML never does, so the clipboard carries
+    // it — the note in the issue body tells the user to paste.
+    if (!uploaded && fitted.truncated) await copyText(clipboardCopy());
 
     try {
       await api.tabs.create({ url: fitted.url });
     } catch {
-      await copyText(full);
+      await copyText(clipboardCopy());
       status.textContent = 'Could not open GitHub — the report is on your clipboard.';
       return;
     }
-    status.textContent = fitted.truncated
-      ? 'Opened GitHub. The full report is on your clipboard — paste it in.'
-      : 'Opened GitHub. Review it, then press Submit.';
+    if (uploaded) {
+      status.textContent = 'Opened GitHub with the snapshot linked. Review it, then press Submit.';
+    } else if (fitted.truncated) {
+      status.textContent = 'Opened GitHub. The full report is on your clipboard — paste it in.';
+    } else {
+      status.textContent = 'Opened GitHub. Review it, then press Submit.';
+    }
     try { window.close(); } catch { /* the host closes the popup itself */ }
   });
 });

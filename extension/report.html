@@ -229,12 +229,21 @@
         <input type="checkbox" id="include-html" checked>
         <span>
             Include page HTML
-            <small>The snapshot that makes a report fixable. It is too big for the prefilled
-                link, so it travels on your clipboard, trimmed to what a GitHub issue can hold —
-                the issue tells you where to paste it. Scripts, styles, meta values and
+            <small>The snapshot that makes a report fixable. Scripts, styles, meta values and
                 credential-shaped values are stripped, but the page’s own content — including
                 anything a logged-in session shows — is not. GitHub issues are public: check the
                 preview before filing.</small>
+        </span>
+    </div>
+
+    <div class="option">
+        <input type="checkbox" id="upload-html" checked>
+        <span>
+            Upload it and link from the issue
+            <small>A GitHub issue cannot hold a whole page, so the snapshot is uploaded to
+                <b>paste.rs</b> when you press Open GitHub issue, and the issue links to it.
+                Anyone with the link can read it and there is no guaranteed expiry. Untick to
+                keep it on your clipboard instead — then only part of it fits.</small>
         </span>
     </div>
 
