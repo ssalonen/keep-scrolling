@@ -55,6 +55,11 @@ const COLLECT_MESSAGE = 'keep-scrolling:collect';
 const SNAPSHOT_ENDPOINT = 'https://paste.rs/';
 const UPLOAD_MAX_BYTES = 393216;
 
+// The shape of a paste path, anchored at both ends: `/AbC12`, optionally with
+// a format extension. Anchoring is the point — an unanchored check would pass
+// on any path that merely contains an id-like run.
+const PASTE_PATH = /^\/[A-Za-z0-9]{1,32}(\.[A-Za-z0-9]{1,8})?$/;
+
 // Retention is undocumented, so the issue says so rather than implying the
 // link is permanent.
 const UPLOAD_NOTE = 'uploaded by the reporter — public to anyone with the link, retention not guaranteed';
@@ -415,14 +420,25 @@ async function uploadSnapshot(html) {
   if (!response.ok) throw new Error(`upload failed (${response.status})`);
 
   const text = (await response.text()).trim();
-  // Never drop raw response text into an issue body. Accept only a URL on the
-  // host we posted to, and strip any extension: `<id>.html` makes paste.rs
-  // RENDER the captured page instead of serving it as text.
-  if (!text.startsWith(SNAPSHOT_ENDPOINT) || /\s/.test(text)) {
+
+  // Never drop raw response text into an issue body — it becomes a markdown
+  // link in a public issue. Validate by PARSING rather than by substring: the
+  // origin must be exactly the host we posted to, and the path must be a bare
+  // paste id. A prefix test would accept anything the host chose to append.
+  let parsed;
+  try {
+    parsed = new URL(text);
+  } catch {
     throw new Error('unexpected upload response');
   }
+  if (`${parsed.origin}/` !== SNAPSHOT_ENDPOINT || !PASTE_PATH.test(parsed.pathname)) {
+    throw new Error('unexpected upload response');
+  }
+
   return {
-    url: text.replace(/\.[a-z0-9]+$/i, ''),
+    // Extension stripped: `<id>.html` makes paste.rs RENDER the captured page
+    // instead of serving it as text.
+    url: `${parsed.origin}${parsed.pathname.replace(/\.[a-z0-9]+$/i, '')}`,
     // 206 means the host truncated it; a client-side trim means we did.
     partial: response.status === 206 || body !== html,
   };

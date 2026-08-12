@@ -300,8 +300,12 @@ test('the uploaded snapshot is trimmed to the host’s byte ceiling, and linked 
     'the returned URL must have any extension stripped — .html would render the captured page',
   );
   assert.ok(
-    /text\.startsWith\(SNAPSHOT_ENDPOINT\)/.test(scriptReport),
-    'only a URL on the host we posted to may reach the issue body',
+    /parsed\.origin\}\/` !== SNAPSHOT_ENDPOINT/.test(scriptReport),
+    'the response URL must be validated by parsing and comparing ORIGIN, not by a substring test',
+  );
+  assert.ok(
+    /const PASTE_PATH = \/\^/.test(scriptReport) && /\$\/;/.test(scriptReport),
+    'the paste-path pattern must be anchored at both ends',
   );
   assert.ok(
     /response\.status === 206/.test(scriptReport),
@@ -390,7 +394,10 @@ test('the upload is opt-in, previewed, and degrades to the clipboard when it fai
   // from the file button, with a box the user can untick, and it must never
   // cost the report when the host rate-limits or is down.
   assert.ok(/id="upload-html"/.test(reportHtml), 'the popup needs the upload opt-out');
-  assert.ok(/paste\.rs/.test(reportHtml), 'the checkbox must name the service it uploads to');
+  // Plain string, not a host-shaped regex: an unanchored /paste\.rs/ reads as
+  // a hostname check that can be bypassed, which is a code-scanning finding
+  // even in a test — and `includes` is what this actually means.
+  assert.ok(reportHtml.includes('paste.rs'), 'the checkbox must name the service it uploads to');
   assert.ok(
     /const willUpload = \(\) =>[\s\S]*?uploadHtml\.checked/.test(scriptReport),
     'uploading must be gated on the checkbox',
@@ -411,7 +418,7 @@ test('the container app tells the truth about what leaves the device', () => {
   // nothing is ever uploaded. If the reporter uploads, that page must say so.
   const claimsAbsolutePrivacy = /<h3>Nothing leaves your device<\/h3>/.test(appHtml);
   assert.ok(!claimsAbsolutePrivacy, 'the unqualified claim is no longer true — qualify it');
-  assert.ok(/paste\.rs/.test(appHtml), 'the privacy card must name the upload service');
+  assert.ok(appHtml.includes('paste.rs'), 'the privacy card must name the upload service');
   assert.ok(/bug/i.test(appHtml), 'and must tie the upload to filing a bug report');
 });
 
