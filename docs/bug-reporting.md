@@ -103,34 +103,44 @@ exists to remove, and the tests cover both:
 
 ## Versioning
 `extension/build-info.json` carries placeholders (`0.0.0-dev`) in the repo and
-is rewritten in the *generated* project by `apply_build_info` (Fastfile) with
-the release version and CI build number; `verify_ipa` then asserts the shipped
-appex really carries them.
+is rewritten by `stage_sources` (Fastfile) in the *staged* copy under `build/`
+with the release version and CI build number; `verify_ipa` then asserts the
+shipped appex really carries them. The tracked file is never written to, so a
+local unstamped build correctly reports `0.0.0-dev`.
 
-Finding the file to stamp took two failed releases to get right. The first
-attempt globbed `build/gen` for it and died with *"Expected exactly 1
-build-info.json … found 0"*; the fix for that globbed for `manifest.json`
-instead, and died the same way — on a file every shipped IPA contains.
+Getting the file into the build at all cost two releases, and the story is the
+clearest example of why this repo stopped generating its Xcode project with
+Apple's `safari-web-extension-converter`.
 
-That second failure is the diagnosis: **the generated project holds no copy of
-`extension/` at all.** It references the tracked directory, so nothing under
-`build/gen` was ever going to match. (A symlinked `Resources` would look the
-same from the outside: `Dir.glob "**"` does not descend into symlinked
-directories, and neither does `Find.find`.)
+**v0.6.0** died with *"Expected exactly 1 build-info.json … found 0"*. The
+explanation at the time: the converter copies what the **manifest** points at,
+and nothing points at this file — `report.js` names it only at runtime, through
+`runtime.getURL`. Declaring it in `web_accessible_resources` would have made the
+converter copy it, at the cost of exposing it to every page for no other reason,
+so `sync_extension_resources` copied in and registered whatever was missing.
 
-So `sync_extension_resources` stopped searching the filesystem and asks the
-appex target's Copy Bundle Resources phase where its resources come from —
-either a folder reference to a directory holding `manifest.json`, or a per-file
-reference to `manifest.json` itself. If that resolves outside `build/gen`, the
-tree is copied to `build/gen/ExtensionResources` and every reference into it is
-repointed, because stamping a version through a reference to the tracked file
-would rewrite the working tree on a dev machine. Anything the project never
-registered is then copied in and registered with `xcodeproj` — copying alone
-would not be enough, since an unreferenced file is never bundled, the same trap
-`apply_app_ui` avoids by overwriting the template's own files in place. `manifest.json`'s own `version` is deliberately left
-alone — the converter reads it on the way to `Info.plist`, which
-`generate_project` repoints at the build settings, and rewriting it after
-conversion would leave the two disagreeing.
+**v0.6.1 then died the same way one glob further along** — *"Expected exactly 1
+manifest.json … found 0"*, on a file every shipped IPA demonstrably contains.
+That disproved the first explanation. The converter keeps **no copy of
+`extension/` inside the generated project at all**: the project *references* the
+tracked directory, directly or through a symlinked `Resources` — and `Dir.glob
+"**"` does not descend into a symlinked directory, nor does `Find.find`. No
+search under the generated tree was ever going to match. The fix was to stop
+searching the filesystem and read the appex target's Copy Bundle Resources phase
+instead, then copy the referenced tree somewhere private before stamping it,
+because writing a version through a reference into `extension/` would have
+rewritten the developer's own working tree.
+
+Since v0.7.0 none of that exists. `project.yml` references a **staged copy** of
+`extension/` as a group, so XcodeGen enumerates it at generate time and every
+file gets bundled whether or not the manifest mentions it — and the paths the
+build stamps are ours by construction rather than something to be discovered.
+`stamp_target!` still refuses any write that resolves back into the tracked tree,
+which is the one part of the v0.6.1 lesson that outlived the converter.
+`verify_ipa` re-derives its expected file list from `extension/`, so a file that
+fails to ship fails the release. `manifest.json`'s own `version` is now a
+vestigial placeholder — the shipped versions come from `native/*/Info.plist`, and
+nothing reads the manifest's copy.
 
 Without the stamp, every report from every release would name the same version
 and be useless for bisecting a regression.

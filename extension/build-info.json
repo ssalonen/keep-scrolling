@@ -1,5 +1,5 @@
 {
-  "_comment": "Stamped at build time by apply_build_info (fastlane/Fastfile) with the release version and CI build number, and read by report.js so every bug report names the exact build it came from. These placeholder values are what a local, unstamped build reports.",
+  "_comment": "Stamped at build time by stage_sources (fastlane/Fastfile) into the STAGED copy under build/, never into this tracked file, with the release version and CI build number. Read by report.js so every bug report names the exact build it came from. These placeholder values are what a local, unstamped build reports.",
   "version": "0.0.0-dev",
   "build": "0"
 }

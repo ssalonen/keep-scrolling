@@ -54,15 +54,22 @@ signed*. Shreddit had **no signing at all**, so this migration also changes the
 
 ```
 Gemfile                     # pins fastlane; commit the generated Gemfile.lock
+project.yml                 # XcodeGen spec: app + appex targets, IDs, scheme
+native/
+  App/                      # AppDelegate, ViewController, Info.plist, AppIcon
+  Extension/                # SafariWebExtensionHandler, Info.plist
 fastlane/
   Appfile                   # bundle ID + APPLE_TEAM_ID
-  Fastfile                  # lanes: certificates, build, beta
+  Fastfile                  # lanes: certificates, project, build, beta
   Matchfile                 # git storage, type: appstore, BOTH bundle IDs
 ```
 
 ### Lanes
 
 - **`certificates`** — `match(readonly: is_ci)`. Seeds/syncs signing from a Mac.
+- **`project`** — stage web resources + `xcodegen generate`, nothing else. Use
+  this to open the project in Xcode; a bare `xcodegen generate` fails on a clean
+  checkout because the spec references `build/staged/…`.
 - **`build`** — generate, sign, archive, export, verify. No upload. This is the
   local sanity check that CI is reproducible.
 - **`beta`** — `build` + `upload_to_testflight`. What `release.yml` runs.
@@ -75,14 +82,121 @@ Two details carried over from the reference:
   Store Connect API key into both means **no `APPLE_ID` / password / 2FA
   anywhere**.
 
-## The Shreddit-specific problem: there is no committed Xcode project
+## Project generation: converter → XcodeGen (v0.7.0)
 
-every-byte-counts commits `project.yml` and runs `xcodegen generate`. Shreddit
-commits **no project at all** — Apple's `safari-web-extension-converter`
-generates the container app + extension appex from `extension/` at build time.
+There is still **no committed Xcode project**. What changed in v0.7.0 is what
+generates it: `xcodegen generate` from a tracked `project.yml` plus tracked Swift
+sources under `native/`, instead of Apple's `safari-web-extension-converter`
+inventing the whole thing from `extension/` on every run. This aligns the repo
+with every-byte-counts, which has always worked this way.
 
-That moves the generate-and-patch step into the Fastfile (`generate_project`), and
-it has to fix six things the converter gets wrong or leaves unset:
+### Why
+
+The converter's output was a black box that ran fresh on every release, against
+whatever Xcode version the macOS runner happened to have. The Fastfile spent
+~260 of its 648 lines patching that output back into shape, and the patches were
+guesses about a template nobody could review. The git log is the argument:
+
+| commit | ± Fastfile | why it existed |
+|---|---|---|
+| `c860bfb` | +26/−19 | the template localizes `Main.html` into `Base.lproj/`; siblings land at the `.app` root |
+| `d94b7eb` | +22/−17 | the template ships no `Script.js` to overwrite |
+| `f2dcf2f` | +38/−0 | the template hardcodes `webView.scrollView.isScrollEnabled = false` |
+| `aba7f61` | +93/−9 | v0.6.0: the converter appeared to copy only what the **manifest** points at |
+| `ffa57fd` | +145/−62 | v0.6.1: it copies **nothing** — the project references the tracked `extension/` |
+
+Five of the nine Fastfile commits after the original fastlane migration were
+`fix:` commits repairing a broken release, and none of them were bugs in the
+extension. The cost also scaled with the product: every feature added (the app
+UI, the X script, the bug reporter) needed a new adapter. XcodeGen makes that
+flat, and removes a hidden risk — a `macos-latest` image bump could previously
+change the template underneath a release.
+
+The last two are worth reading together, because they are the same bug diagnosed
+twice and they are the strongest single argument here. v0.6.0 failed looking for
+`build-info.json` under the generated tree; the fix assumed the converter had
+simply skipped a file the manifest never named. v0.6.1 then failed looking for
+`manifest.json` — a file every shipped IPA demonstrably contains — which
+disproved that. The converter keeps **no copy of `extension/` in the generated
+project at all**; it references the tracked directory, sometimes through a
+symlinked `Resources` that `Dir.glob "**"` will not descend into. Two releases
+were spent discovering that the generator's output was not merely unreviewable
+but *pointed back at the working tree*, which is what makes "stamp the version
+into the build" a working-tree mutation.
+
+Owning the spec dissolves the question: we choose where the resources come from,
+so there is nothing to locate. What survives is the consequence — see
+"Staging" below, and `stamp_target!`.
+
+### What that cost
+
+~200 lines of Swift and plist boilerplate, now tracked under `native/`, taken
+from one final converter run rather than written from scratch:
+
+```
+native/App/AppDelegate.swift              # window-based; no scene delegate
+native/App/ViewController.swift           # the WKWebView that hosts app/Main.html
+native/App/Info.plist
+native/App/Assets.xcassets/AppIcon.appiconset/icon-1024.png
+native/Extension/SafariWebExtensionHandler.swift   # principal class; does nothing
+native/Extension/Info.plist
+```
+
+Plus the toolchain dependency: `release.yml` ensures `xcodegen` is on PATH
+(preinstalled on GitHub's macOS images; installed via brew only if missing).
+
+The honest trade: we no longer get Apple's knowledge of the appex shape for
+free. If Apple changes what an iOS Safari web extension requires, the converter
+would have handed it over and these tracked sources will not. That is a real
+loss, but the failure mode is a loud build or review error, and the table above
+shows we were paying more to fight template drift than we were getting from it.
+
+### Staging: the one thing a build writes
+
+`stage_sources` copies `extension/` and `app/` into `build/staged/` and stamps
+the build's version into the **copies** — `build-info.json` and `Main.html`'s
+footer. `project.yml` points at the staged directories, so:
+
+- the tracked `extension/build-info.json` keeps its `0.0.0-dev` placeholders and
+  `app/Main.html` keeps its raw `__APP_VERSION__` token, which is exactly what an
+  unstamped local build should report;
+- **no build ever writes to a tracked file.** Two repos have now been bitten by
+  the inverse: every-byte-counts, where XcodeGen wrote over tracked
+  `.entitlements` files, and this one at v0.6.1, where the converter handed back
+  references straight into `extension/` so stamping a version would have
+  rewritten the developer's checkout and made the build non-reproducible. There
+  is no `git diff --exit-code` gate here because nothing tracked is generated —
+  staging is what keeps that true.
+
+`stamp_target!` enforces the second point at runtime: every path the build stamps
+goes through it, and it refuses — with `File.realpath`, so a symlinked staging
+directory cannot smuggle the write back in — if the target resolves inside
+`extension/` or `app/`. Structurally that cannot happen, since the callers build
+their paths from `STAGE_DIR`; it is there because the failure is silent and
+expensive, and because v0.6.1 proved the assumption "the path I was handed is
+mine to write" can be wrong. `test/extension.test.js` asserts both the staged
+paths and the guard.
+
+`build/staged/extension` is referenced as a **group**, not a folder reference, so
+XcodeGen enumerates it at generate time and each file gets its own entry in Copy
+Bundle Resources, landing flat at the appex root where Safari reads
+`manifest.json`. A folder reference would nest everything under `extension/` and
+Safari would find nothing.
+
+The side effect worth naming: adding a file to `extension/` or `app/` now needs
+**no build change at all** — no Fastfile edit, no manifest entry, no `xcodeproj`
+registration. That was the whole point of `sync_extension_resources`, achieved by
+deleting it.
+
+> **Local note:** a bare `xcodegen generate` fails on a clean checkout, because
+> the spec's `build/staged/…` paths do not exist yet. Use
+> `bundle exec fastlane project`, which stages first.
+
+### Historical: the six things the converter got wrong
+
+Kept because they explain the shape of `project.yml` and the `native/` plists,
+and because every one of them is a trap to re-check if anyone is ever tempted to
+reintroduce the converter.
 
 1. **Bundle identifiers.** The converter builds the container app's
    `PRODUCT_BUNDLE_IDENTIFIER` from `--bundle-identifier`'s **prefix** plus
@@ -210,40 +324,62 @@ it has to fix six things the converter gets wrong or leaves unset:
    file, and refuses outright if the path it is about to stamp resolves to the
    tracked `extension/build-info.json`.
 
-Patching a generated project is safe **because it is a build artifact** under
-`build/gen`, regenerated from scratch every run. This is the opposite of the bug
-that broke every-byte-counts, where XcodeGen was writing over *tracked*
-`.entitlements` files. There is no equivalent `git diff --exit-code` gate here
-because nothing tracked is generated — but for the same reason, **never point the
-converter at a path inside the repo that is under version control.**
+**How each of those is handled now**, with no patching step:
+
+| # | converter defect | replaced by |
+|---|---|---|
+| 1 | invents a mis-cased bundle id | `PRODUCT_BUNDLE_IDENTIFIER` set per target in `project.yml` |
+| 2 | automatic signing, no team | unchanged — `match` + `apply_signing` still stamp Release |
+| 3 | writes the literal manifest version into `Info.plist` | `native/*/Info.plist` reference `$(MARKETING_VERSION)` / `$(CURRENT_PROJECT_VERSION)` directly |
+| 4 | no export-compliance key | `ITSAppUsesNonExemptEncryption` is in `native/App/Info.plist` |
+| 5 | placeholder container-app page, in a template layout we had to guess | `app/Main.html` is staged and bundled at a path `project.yml` declares |
+| 6 | copies only what the manifest points at | `project.yml` bundles the whole staged `extension/` as a group |
+
+One converter behaviour worth keeping in mind for (3) and (4):
+`GENERATE_INFOPLIST_FILE=YES` makes Xcode merge the `INFOPLIST_KEY_*` build
+settings **over** the `Info.plist` file, which is how the display name silently
+shipped as `KeepScrolling` instead of `Keep Scrolling`. `project.yml` sets it to
+`NO` so the tracked plists are unambiguously the source of truth;
+`test/extension.test.js` guards that.
 
 ## The verify gate
 
-every-byte-counts verifies entitlements (it has an App Group to lose). Shreddit
-has no entitlements to check, so `verify_ipa` asserts the invariants that a
-converter change would actually break, **against the exported IPA** rather than
-against the inputs that produced it:
+every-byte-counts verifies entitlements (it has an App Group to lose). Keep
+Scrolling has no entitlements to check, so `verify_ipa` asserts the invariants
+that a build-system change would actually break, **against the exported IPA**
+rather than against the inputs that produced it:
 
 1. exactly one `.app`, with `CFBundleIdentifier == fi.mailhub.keepscrolling`
 2. exactly one embedded `.appex`, correctly nested under the app's id
    (the case-mismatch bug, now caught at build time instead of on device)
-3. both carry the tag's version **and** this run's build number — otherwise ASC
+3. the appex declares `NSExtensionPointIdentifier =
+   com.apple.Safari.web-extension` — without it the extension installs and
+   Safari simply never loads it
+4. both carry the tag's version **and** this run's build number — otherwise ASC
    rejects the upload, or worse, accepts a mislabelled one
-4. the app declares `ITSAppUsesNonExemptEncryption` — a missing value fails
+5. both carry the user-visible `CFBundleDisplayName`
+6. the app declares `ITSAppUsesNonExemptEncryption` — a missing value fails
    *open*: the upload succeeds and the build then sits in "Missing Compliance"
    until a human notices
-5. `block-reddit-nag.js`, `block-x-nag.js`, and `manifest.json` are actually
-   inside the appex
-6. the container app bundles **our** `Main.html`, with the build's version
+7. **every file in `extension/`** is at the appex root, and `build-info.json`
+   carries this build's version
+8. the container app bundles **our** `Main.html`, with the build's version
    stamped in and no leftover `__APP_VERSION__` placeholder
 
-(5) is the one that matters most: a correctly signed, correctly versioned IPA
+(7) is the one that matters most: a correctly signed, correctly versioned IPA
 containing **no extension code** would sail through to TestFlight and simply do
-nothing on device. (6) is the same failure mode one level down: if the converter
-moves its app template, `apply_app_ui`'s copy lands somewhere unbundled and the
-app quietly ships Apple's placeholder line instead. This is the reference repo's
-central lesson — *a check whose expectation comes from the same source as the
-thing being checked is not a check* — so all six read the shipped artifact.
+nothing on device. It also checks the *location*, not just presence — the files
+have to be flat at the appex root, which is where Safari reads `manifest.json`
+from. Its expected list is re-derived from `extension/` on every run, with
+`CONTENT_SCRIPTS` and `REPORT_FILES` unioned in as a floor: the glob alone would
+quietly shrink if a file were deleted, the named constants would not.
+
+These checks were load-bearing under the converter, which invented the project
+fresh on every release. With `project.yml` and `native/` tracked and reviewable
+they should now essentially never fire — but they keep the property that makes a
+check worth having, and which is the reference repo's central lesson: *a check
+whose expectation comes from the same source as the thing being checked is not a
+check.* All eight read the shipped artifact.
 
 ## Secrets
 
@@ -319,10 +455,20 @@ Run the **Bump version and make a release** workflow with
 
 ## Open items
 
-- **`Gemfile.lock` is not committed yet** — it cannot be generated in an
-  environment without fastlane installed. `ruby/setup-ruby` with
-  `bundler-cache: true` will resolve and lock on the first CI run, but commit the
-  lock from step 4 above so CI and local machines are pinned identically.
+- **The XcodeGen migration has not been built on a Mac.** `project.yml` and the
+  `native/` sources were written from the documented converter template shape;
+  nothing here has run `xcodegen generate` or `xcodebuild`. Verify with
+  `MARKETING_VERSION=0.7.0 bundle exec fastlane build` before trusting a release,
+  and ship it as a **no-op release** — no functional change in the same tag — so
+  a failure is unambiguously the build system. Bundle IDs are unchanged, so
+  `match` and the provisioning profiles are untouched.
+
+  Specific things a Mac build is most likely to catch: the app icon
+  (`native/App/Assets.xcassets`, a 1024px opaque PNG upscaled from `icon.png` —
+  App Store Connect rejects an icon with an alpha channel), whether XcodeGen
+  needs `Info.plist` excluded from the source groups the way it is written here,
+  and whether the appex resources really land flat at the bundle root
+  (`verify_ipa` asserts this, so it fails loudly rather than shipping).
 - **Version floor.** `ci.yml` used to take `max(latest tag, altstore-source.json
   version)` so the version could only move forward. With the JSON gone, **git
   tags are the only version store** — `compute-version` therefore depends on

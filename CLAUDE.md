@@ -30,14 +30,19 @@ the independent `extension/block-x-nag.js`. Full background and references:
   message from the popup with a page snapshot. See "Bug reporting" below.
 - `extension/report.html` + `extension/report.js` — the toolbar popup that turns
   that snapshot into a prefilled GitHub issue.
-- `extension/build-info.json` — version/build placeholders, stamped at build
-  time by `apply_build_info` and read by `report.js`.
+- `extension/build-info.json` — version/build placeholders, stamped into the
+  *staged* copy at build time by `stage_sources` and read by `report.js`.
 - `extension/manifest.json` — MV3 manifest declaring the content scripts and the
   popup action.
 - `extension/icon-{48,96,128}.png` — extension icons.
 - `app/Main.html` — the container app's UI (feature overview + enable steps),
-  one self-contained file. Copied over the converter's placeholder page by
-  `apply_app_ui` in the Fastfile — see "Container app UI" below.
+  one self-contained file — see "Container app UI" below.
+- `project.yml` — the XcodeGen spec: two targets (app + appex), their bundle IDs,
+  and the shared scheme. See "Build / release / test".
+- `native/App/` — container-app Swift sources (`AppDelegate`, `ViewController`),
+  `Info.plist`, and `Assets.xcassets` (the 1024px app icon).
+- `native/Extension/` — `SafariWebExtensionHandler.swift` (the appex's principal
+  class; does nothing — there is no native messaging) and its `Info.plist`.
 - `.github/workflows/` — CI/CD (see below).
 - `fastlane/` — `Fastfile` (lanes: `certificates`, `build`, `beta`), `Appfile`,
   `Matchfile`. Signing + release live here, not in workflow bash.
@@ -54,7 +59,7 @@ the independent `extension/block-x-nag.js`. Full background and references:
   Conventional Commits and triggers a release.
 - **Release** (`release.yml`): on a `v*` tag (or `workflow_call`), a macOS `build`
   job runs `bundle exec fastlane beta` — generate the Xcode project from
-  `extension/`, sync signing with `match`, archive/export a **signed App Store
+  `project.yml`, sync signing with `match`, archive/export a **signed App Store
   IPA**, verify it, and upload to **TestFlight**. A cheap ubuntu `publish` job
   then writes the changelog + GitHub Release (notes only, no IPA attached).
 - **Bump** (`bump-version.yml`): manual `workflow_dispatch` → pick patch/minor/major.
@@ -63,15 +68,37 @@ the independent `extension/block-x-nag.js`. Full background and references:
   `workflow_call`, and without it every signing secret expands to `""`.
 - **Install**: via TestFlight. Then on device: Settings ▸ Apps ▸ Safari ▸
   Extensions ▸ enable, set reddit.com to Allow Always.
-- **No Xcode project is committed** — it is generated into `build/gen` on every
-  run by `generate_project` in the Fastfile, which also forces the bundle IDs,
-  repoints the `Info.plist` version keys at the build settings, and declares
-  export compliance (`ITSAppUsesNonExemptEncryption`) so TestFlight builds are
-  not parked behind a manual question. Patching it is
-  safe *because* it is a throwaway artifact; never point the converter at a
-  tracked path.
+- **No Xcode project is committed** — `generate_project` (Fastfile) stages the
+  web resources, then runs `xcodegen generate` from `project.yml` into a
+  gitignored `KeepScrolling.xcodeproj` at the repo root. The spec and the
+  `native/` sources are tracked and reviewable, so nothing is patched after
+  generation.
+- IMPORTANT: **`build/staged/` is the only thing a build writes.** `stage_sources`
+  copies `extension/` and `app/` there and stamps the version into the copies, so
+  the tracked `build-info.json` keeps its `0.0.0-dev` placeholders and
+  `app/Main.html` keeps its raw `__APP_VERSION__` token. Never make a build write
+  to a tracked file — that is the bug that broke the reference repo
+  (every-byte-counts), where the generator wrote over tracked `.entitlements`.
+- IMPORTANT: `project.yml` references `build/staged/extension` as a **group**
+  (`type: group`), not a folder reference. That is what puts every file at the
+  appex bundle root, where Safari reads `manifest.json`; a folder reference would
+  nest them under `extension/` and Safari would find nothing.
 - **Local**: `bundle exec fastlane build` runs the whole pipeline minus the
-  upload. See `docs/FASTLANE-MIGRATION.md` for one-time setup.
+  upload; `bundle exec fastlane project` just generates the project for Xcode.
+  A bare `xcodegen generate` fails on a clean checkout — the spec's
+  `build/staged/…` paths do not exist until a lane stages them. See
+  `docs/FASTLANE-MIGRATION.md` for one-time setup.
+- Up to **v0.6.x** the project was generated instead by Apple's
+  `safari-web-extension-converter`, and the Fastfile spent ~260 lines patching
+  its output. Five of the nine post-migration Fastfile commits were `fix:`
+  commits repairing a release that died in that patching. Do not reintroduce it.
+- IMPORTANT: the v0.6.1 finding that outlived the converter — it kept **no copy**
+  of `extension/` in the generated project, it *referenced* the tracked
+  directory (sometimes via a symlink `Dir.glob "**"` won't descend into). So a
+  build could rewrite the working tree just by stamping a version. Every path the
+  build stamps now goes through `stamp_target!`, which refuses (via
+  `File.realpath`) anything resolving inside `extension/` or `app/`. Keep it that
+  way: add a new stamped path and route it through the guard.
 - **Manual on-device test**: open a subreddit post logged-out in Safari, wait past
   the ~30s timer. PASS = no fog overlay, page scrolls, no "Get the app" sheet. To
   re-arm the trigger between tests, clear reddit.com cookies (it is visit/cookie-gated).
@@ -206,62 +233,62 @@ and iOS gives a user no way to do that. Full design: @docs/bug-reporting.md
 - Unlike `app/Main.html`, the popup **must not** inline its JS: extension pages
   run under MV3's `script-src 'self'`, which blocks inline scripts. The two
   pages have opposite constraints for opposite reasons.
-- `build-info.json` is stamped in the *generated* project by `apply_build_info`
-  (like `apply_app_ui`), never in the tracked file, and `verify_ipa` asserts the
-  shipped values. `manifest.json`'s own `version` stays a placeholder — the
-  converter reads it on the way to `Info.plist`.
-- IMPORTANT: the generated project keeps **no copy** of `extension/` — it
-  *references* the tracked directory. Searching `build/gen` for an extension
-  file therefore always finds nothing, which failed two releases in a row
-  (v0.6.0 on `build-info.json`, v0.6.1 on `manifest.json` itself, a file every
-  shipped IPA demonstrably contains). Note `Dir.glob "**"` does not descend
-  into a symlinked directory either, so a symlinked `Resources` looks identical
-  to an absent one. `sync_extension_resources` resolves the appex's resource
-  directory **from the target's Copy Bundle Resources phase**, copies the
-  referenced tree to `build/gen/ExtensionResources`, and repoints the
-  references — which is what makes `apply_build_info` safe to stamp without
-  rewriting the tracked file. Adding a file to `extension/` needs no Fastfile
-  change; anything unregistered is copied in and registered.
+- `build-info.json` is stamped by `stage_sources` into the staged copy under
+  `build/`, never in the tracked file, and `verify_ipa` asserts the shipped
+  values. `manifest.json`'s own `version` is a leftover placeholder that nothing
+  reads any more — the versions ship via `native/*/Info.plist`.
+- IMPORTANT: `build-info.json` is named nowhere but in `report.js`'s
+  `runtime.getURL`. Under the old converter — which copied only what the
+  **manifest** pointed at — it was simply absent from the generated project and
+  failed the v0.6.0 release. `project.yml` now bundles the whole staged
+  `extension/` directory file by file, so a runtime-only file needs no manifest
+  entry and adding a file to `extension/` needs no build change at all.
+  `verify_ipa` re-derives its expected file list from `extension/`, so a file
+  that fails to ship fails the release.
 
-## Container app UI (`app/`)
+## Container app UI (`app/` + `native/App/`)
 The container app (the home-screen icon) does nothing functional — the product
-is the extension — but it is the only screen a user ever sees, and the converter
-ships it as one line of placeholder text. `app/` replaces that with a short
-feature overview and the enable steps, in the same no-dependency spirit as the
-content scripts: system fonts, inline SVG glyphs, light + dark, safe-area
-insets, **zero network requests**.
+is the extension — but it is the only screen a user ever sees, and Apple's
+template ships it as one line of placeholder text. `app/Main.html` replaces that
+with a short feature overview and the enable steps, in the same no-dependency
+spirit as the content scripts: system fonts, inline SVG glyphs, light + dark,
+safe-area insets, **zero network requests**. `native/App/ViewController.swift` is
+the WKWebView host that loads it.
 
-- `apply_app_ui` (Fastfile) copies `app/Main.html` over the generated app's own
-  `Main.html` and substitutes `__APP_VERSION__` with the build's version.
-  `verify_ipa` then asserts the shipped `.app` really contains our page at the
-  right version — a converter template move would otherwise silently re-ship
-  Apple's placeholder.
-- IMPORTANT: the page must scroll on its own. Apple's app template disables
-  the web view's scroll view on iOS (`webView.scrollView.isScrollEnabled =
-  false`) because its placeholder page is one line, which left everything
-  below the fold unreachable in our overview screen. Two layers fix it and
-  both are guarded by `test/extension.test.js`: `enable_app_scrolling`
-  (Fastfile) flips that line in the generated Swift, and `main` is an
-  `overflow-y:auto` container so the page scrolls inside WebKit even if a
-  future template moves the line.
-- IMPORTANT: overwrite the template's `Main.html` **in place**; do not add
-  files. The generated project references exactly that path, so anything new
-  would be copied but never bundled unless registered with `xcodeproj`.
+- `stage_sources` (Fastfile) copies `app/Main.html` to `build/staged/app/` and
+  substitutes `__APP_VERSION__` with the build's version; `project.yml` bundles
+  that staged copy, so it lands at the `.app` root. `verify_ipa` then asserts the
+  shipped `.app` really contains our page at the right version.
+- IMPORTANT: the page must scroll on its own. Apple's template sets
+  `webView.scrollView.isScrollEnabled = false` because its placeholder page is
+  one line, which left everything below the fold unreachable in our overview
+  screen. Two layers fix it and both are guarded by `test/extension.test.js`:
+  `ViewController.swift` sets it to `true`, and `main` is an `overflow-y:auto`
+  container so the page scrolls inside WebKit regardless.
 - IMPORTANT: keep the page **one self-contained file** — CSS, JS and the icon
-  all inline. Two release failures came from assuming otherwise: the template
-  ships no `Script.js` at all (v0.5.1), and it localizes the page into
-  `<App>/Resources/Base.lproj/` while plain resources land at the `.app` root,
-  so relative references to siblings do not resolve at runtime (v0.5.0 was the
-  same directory assumption). `apply_app_ui` globs per filename for the same
-  reason — never hard-code the layout.
+  all inline. Under the converter this was forced (v0.5.1: the template shipped
+  no `Script.js` to overwrite; v0.5.0: it localized the page into
+  `<App>/Resources/Base.lproj/` while plain resources landed at the `.app` root,
+  so sibling references did not resolve). Owning the project removes that trap —
+  everything staged from `app/` now lands together at the `.app` root — but keep
+  it anyway: `verify_ipa` checks `Main.html` and nothing else, so a sibling asset
+  could go missing with no check to catch it.
 - IMPORTANT: `__APP_VERSION__` must appear **exactly once** in the page.
-  `apply_app_ui` gsubs every occurrence, so a second one (e.g. inside the
+  `stage_sources` gsubs every occurrence, so a second one (e.g. inside the
   inline script) is rewritten too — that is why the script detects an
   unsubstituted footer by shape (`/^Version\s/`) rather than by the token.
-- Keep the two host contracts from Apple's template: a global
-  `show(platform, enabled, useSettingsInsteadOfPreferences)` (the ViewController
-  calls it via `evaluateJavaScript`) and the `"open-preferences"` message to
-  `webkit.messageHandlers.controller` (macOS-only button).
+- Keep the two host contracts from Apple's template, so the page stays portable:
+  a global `show(platform, enabled, useSettingsInsteadOfPreferences)` (the
+  ViewController calls it via `evaluateJavaScript`) and the `"open-preferences"`
+  message to `webkit.messageHandlers.controller` (macOS-only button).
+- iOS cannot read whether a Safari extension is enabled
+  (`SFSafariExtensionManager` is macOS-only), so the host passes `enabled` as
+  **null**, not `false` — the page only touches its status line for an actual
+  boolean, and claiming "off" would be worse than saying nothing.
+- The app is **window-based**, not scene-based: `AppDelegate` owns the
+  `UIWindow` directly. Do not add a `UIApplicationSceneManifest` to
+  `native/App/Info.plist` — it would sideline `AppDelegate.window` and the app
+  would launch to a black screen. `test/extension.test.js` guards this.
 - Keep the overview truthful: `test/extension.test.js` asserts every host in
   `manifest.json` is named on the page, so adding a third site to the manifest
   fails CI until the copy mentions it.
