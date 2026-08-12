@@ -211,6 +211,18 @@ snapshot", and iOS gives a user no way to do that. Full design:
   budget and diagnoses nothing. When the HTML is dropped, the body says so in
   its place and points at the clipboard — without that line the issue reads as
   complete and nobody pastes. Keep the order, and keep the note.
+- IMPORTANT: the clipboard is bounded too. GitHub rejects an issue body over
+  **65 536 characters** ("Body can not be longer than 65536 characters"), a
+  server-side check on the pasted text — shipping an untrimmed copy made the
+  paste fail outright. `fitClipboard()` budgets it at `BODY_BUDGET = 65000`,
+  and the preview shows exactly what will paste. Both paths share `shrink()`
+  and differ only in what they measure.
+- IMPORTANT: when the page HTML must be cut, cut the **middle** and keep both
+  ends (`trimMiddle()` in `report.js`, `clampDocument()` in
+  `collect-report.js`). `<head>` carries the preloads/stylesheets that named
+  both variants in `docs/`; the nags are appended late in `<body>`. A
+  head-first truncation keeps the one part of the document that never contains
+  the bug being reported — which is what the collector's cap originally did.
 - The overlay/component block is deliberately trimmed (`ISSUE_OVERLAYS`,
   `ISSUE_TAG_LIMIT`) so it *survives* that trim on a real page — a diagnostics
   block dropped from every issue is the same as not collecting it. A test sizes

@@ -89,6 +89,45 @@ diagnostics block that gets dropped on every real page is the same as never
 having collected it. A test measures a realistic X-status-page report end to
 end and fails if the lock state or the overlay summary stops fitting.
 
+## The issue-body limit — the clipboard is bounded too
+The clipboard is the transport, but it is **not** an unbounded one. GitHub
+rejects an issue body over **65 536 characters** outright:
+
+```
+Body can not be longer than 65536 characters
+```
+
+That is a server-side validation on the pasted text, so it applies no matter
+how the body arrives. The first version of this reporter budgeted the URL and
+treated the clipboard as unlimited, which produced a copy of up to 400 KB —
+one that could not be pasted at all. A snapshot that cannot be pasted is worth
+no more than one that was never captured.
+
+So `fitClipboard()` budgets the copy at `BODY_BUDGET = 65000`, and the popup
+shows and copies exactly that fitted text — the preview is what will paste.
+Both paths share one `shrink()`, differing only in what they measure: the
+prefilled link measures `issueUrl(...).length`, the clipboard measures the
+body's own length.
+
+### Why the page HTML is cut from the middle
+In the clipboard path the HTML is **trimmed, not dropped** — there is room for
+tens of thousands of characters of it — and the cut takes the **middle**,
+keeping both ends, because that is where the evidence is:
+
+- `<head>` holds the `modulepreload` names and injected stylesheets. Both
+  diagnoses in `docs/` started there (`logged-out-open-app-banner`, `vaul`).
+- the nags themselves are appended **late in `<body>`** — Reddit's blocking
+  sheet, X's app-store modal, X's drawer.
+
+A plain prefix keeps `<head>` and loses the nag, which is the whole report.
+The cut is marked in place so nobody reads the join as the page's real markup.
+
+`collect-report.js` clamps the same way (`clampDocument()`) when the document
+exceeds its own 400 000-character port cap — for exactly the same reason, one
+level up. A head-first `truncate()` there would throw away the end of `<body>`
+before `report.js` ever saw it, capping the snapshot to the one part of the
+document that never contains what is being reported.
+
 ## What the snapshot contains, and why
 `collect-report.js` is a third content script on the same hosts as the two nag
 scripts. It **reads only** — the test suite fails on `.remove()`,
@@ -231,7 +270,9 @@ and be useless for bisecting a regression.
   a second tab with the snapshot in a `<textarea>` for the user to select.
 - **Budget realism.** 6000 was chosen with headroom, not measured against
   GitHub's actual ceiling. If prefilled links start 414ing, lower it; the
-  clipboard path is unaffected.
+  clipboard path is unaffected. The *body* limit, by contrast, is not a guess —
+  65 536 is GitHub's own error message, hit in practice on the first real
+  report filed with this reporter.
 - **Overlay scan cost.** `collectOverlays()` calls `getComputedStyle()` on up
   to 8 000 elements. Measured only in a desktop headless run, where it is
   imperceptible; on an older iPhone it may be a visible pause between opening

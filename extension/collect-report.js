@@ -81,6 +81,20 @@
     return `${text.slice(0, limit)}\n…[truncated, ${text.length} chars total]`;
   }
 
+  // The page HTML is capped differently from everything else: it keeps BOTH
+  // ends and loses the middle. A plain head-first truncation throws away the
+  // end of `<body>`, which is exactly where a late-injected nag lands — the
+  // report would then be capped at the one part of the document that never
+  // contains what is being reported. The head is worth keeping too, for the
+  // preloads and injected stylesheets that named both variants in docs/.
+  function clampDocument(html, limit) {
+    if (typeof html !== 'string' || html.length <= limit) return html || '';
+    const head = Math.floor(limit * 0.25);
+    const tail = limit - head;
+    return `${html.slice(0, head)}\n…[${html.length - limit} chars cut from the middle; `
+      + `${html.length} total]…\n${html.slice(html.length - tail)}`;
+  }
+
   // Best-effort redaction. Script and style bodies go first: they are the bulk
   // of a Reddit/X page and the likeliest place for a session token to sit in an
   // inline JSON blob.
@@ -268,7 +282,7 @@
       signatures: collectSignatures(),
       overlays: collectOverlays(),
       components: collectComponents(),
-      html: truncate(sanitizeHtml(root ? root.outerHTML : ''), HTML_LIMIT),
+      html: clampDocument(sanitizeHtml(root ? root.outerHTML : ''), HTML_LIMIT),
     };
   }
 

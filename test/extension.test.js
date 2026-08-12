@@ -246,8 +246,8 @@ function loadReportHelpers() {
   const pure = scriptReport.slice(0, scriptReport.indexOf(marker));
   assert.ok(scriptReport.includes(marker), 'report.js must keep the pure/wiring split');
   return new Function(
-    `${pure}\nreturn { truncate, buildBody, issueUrl, fitIssue, defaultTitle, describeSnapshot,
-      SYMPTOMS, URL_BUDGET };`,
+    `${pure}\nreturn { truncate, buildBody, issueUrl, fitIssue, fitClipboard, trimMiddle,
+      defaultTitle, describeSnapshot, SYMPTOMS, URL_BUDGET, BODY_BUDGET };`,
   )();
 }
 
@@ -478,6 +478,56 @@ test('the report names the build it came from and the state of the page', () => 
   assert.ok(!diagnostics.includes('<div data-interaction'), 'samples are a separate, droppable tier');
 
   assert.ok(samples.includes('<div data-interaction'), 'the matched markup goes in the bulky tier');
+});
+
+test('the clipboard copy fits GitHub’s hard 65536-character issue body', () => {
+  // GitHub rejects an over-long body outright — "Body can not be longer than
+  // 65536 characters" — so the copy the user pastes is budgeted like the URL.
+  // An untrimmed copy is not a bigger report, it is a report that cannot be
+  // filed at all.
+  const { fitClipboard, BODY_BUDGET } = loadReportHelpers();
+  assert.ok(BODY_BUDGET <= 65536, 'the budget must stay under GitHub’s hard limit');
+
+  const parts = {
+    symptoms: [{ label: 'The page will not scroll' }],
+    description: 'It froze after a few seconds.',
+    environment: { 'Keep Scrolling': '1.2.3 (45)' },
+    pageState: '{"scrollable": false}',
+    diagnostics: '{"overlays": []}',
+    html: `<html><head>${'<link rel="modulepreload" href="/a.js">'.repeat(9000)}</head>`
+      + `<body>${'<div>filler</div>'.repeat(9000)}`
+      + '<div data-interaction="app-store-obstruction">See this post in the app</div></body></html>',
+  };
+
+  const fitted = fitClipboard(parts, BODY_BUDGET);
+  assert.ok(fitted.body.length <= BODY_BUDGET, `clipboard body ${fitted.body.length} over budget`);
+  assert.ok(fitted.truncated, 'a trimmed copy must say so, so the caller can tell the user');
+  assert.ok(fitted.body.includes(parts.description), 'the user’s own words survive');
+  assert.ok(fitted.body.includes('{"scrollable": false}'), 'the lock state survives');
+
+  // Both ends of the document, because both carry evidence: the preloads in
+  // <head>, and the nag appended at the end of <body>.
+  assert.ok(fitted.body.includes('<html><head><link rel="modulepreload"'), 'the head of the page survives');
+  assert.ok(
+    fitted.body.includes('data-interaction="app-store-obstruction"'),
+    'the END of the document must survive — a late-injected nag is exactly what a prefix loses',
+  );
+  assert.ok(/cut from the middle/.test(fitted.body), 'the cut must be marked, not silently joined');
+
+  // A report that already fits is passed through untouched.
+  const small = fitClipboard({ ...parts, html: '<html>small</html>' }, BODY_BUDGET);
+  assert.equal(small.truncated, false);
+  assert.ok(small.body.includes('<html>small</html>'));
+});
+
+test('trimMiddle keeps both ends and never exceeds what it was given', () => {
+  const { trimMiddle } = loadReportHelpers();
+  const html = `START${'x'.repeat(50000)}END`;
+  const trimmed = trimMiddle(html, 5000);
+  assert.ok(trimmed.startsWith('START'), 'the head must be the head');
+  assert.ok(trimmed.endsWith('END'), 'the tail must be the tail');
+  assert.ok(trimmed.length < 5400, `marker aside, the result must respect the budget: ${trimmed.length}`);
+  assert.equal(trimMiddle('short', 5000), 'short', 'what already fits is untouched');
 });
 
 test('a realistic report keeps the lock state AND the overlay summary inside the real budget', () => {
@@ -716,6 +766,28 @@ test('the collector still only reads the page after growing new diagnostics', ()
   assert.ok(
     scriptCollect.includes('OVERLAY_SCAN_LIMIT'),
     'the overlay scan must be capped — it touches every element on the page',
+  );
+});
+
+test('the collector caps the page HTML from the MIDDLE, keeping the end of <body>', () => {
+  // The cap used to keep the head. On a page bigger than the cap that threw
+  // away the end of <body> — the one place a late-injected nag actually is —
+  // so the snapshot was capped to the part that never contains the bug.
+  const source = scriptCollect.match(/function clampDocument\(html, limit\) \{[\s\S]*?\n  \}/);
+  assert.ok(source, 'clampDocument() not found in collect-report.js');
+  const clampDocument = new Function(`${source[0]}; return clampDocument;`)();
+
+  const html = `<html><head>PRELOADS</head><body>${'x'.repeat(20000)}<div id="nag"></div></body></html>`;
+  const clamped = clampDocument(html, 4000);
+  assert.ok(clamped.length < 4400, `clamped to ${clamped.length}, budget 4000 plus marker`);
+  assert.ok(clamped.includes('PRELOADS'), 'the head carries the preloads that named both variants');
+  assert.ok(clamped.includes('<div id="nag"></div></body></html>'), 'the end of the document must survive');
+  assert.ok(/cut from the middle/.test(clamped), 'the cut must be marked');
+  assert.equal(clampDocument('<html>tiny</html>', 4000), '<html>tiny</html>');
+
+  assert.ok(
+    scriptCollect.includes('html: clampDocument('),
+    'the page HTML must go through clampDocument, not the head-first truncate()',
   );
 });
 
