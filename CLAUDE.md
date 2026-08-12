@@ -210,13 +210,18 @@ and iOS gives a user no way to do that. Full design: @docs/bug-reporting.md
   (like `apply_app_ui`), never in the tracked file, and `verify_ipa` asserts the
   shipped values. `manifest.json`'s own `version` stays a placeholder — the
   converter reads it on the way to `Info.plist`.
-- IMPORTANT: the converter copies only what the **manifest** points at, so
-  `build-info.json` — named nowhere but in `report.js`'s `runtime.getURL` — was
-  simply absent from the generated project and failed the v0.6.0 release.
-  `sync_extension_resources` (Fastfile) copies in and registers anything from
-  `extension/` the converter skipped, so a runtime-only file no longer has to
-  be declared in the manifest just to be bundled. Adding a file to `extension/`
-  needs no Fastfile change.
+- IMPORTANT: the generated project keeps **no copy** of `extension/` — it
+  *references* the tracked directory. Searching `build/gen` for an extension
+  file therefore always finds nothing, which failed two releases in a row
+  (v0.6.0 on `build-info.json`, v0.6.1 on `manifest.json` itself, a file every
+  shipped IPA demonstrably contains). Note `Dir.glob "**"` does not descend
+  into a symlinked directory either, so a symlinked `Resources` looks identical
+  to an absent one. `sync_extension_resources` resolves the appex's resource
+  directory **from the target's Copy Bundle Resources phase**, copies the
+  referenced tree to `build/gen/ExtensionResources`, and repoints the
+  references — which is what makes `apply_build_info` safe to stamp without
+  rewriting the tracked file. Adding a file to `extension/` needs no Fastfile
+  change; anything unregistered is copied in and registered.
 
 ## Container app UI (`app/`)
 The container app (the home-screen icon) does nothing functional — the product
