@@ -210,6 +210,13 @@ and iOS gives a user no way to do that. Full design: @docs/bug-reporting.md
   (like `apply_app_ui`), never in the tracked file, and `verify_ipa` asserts the
   shipped values. `manifest.json`'s own `version` stays a placeholder — the
   converter reads it on the way to `Info.plist`.
+- IMPORTANT: the converter copies only what the **manifest** points at, so
+  `build-info.json` — named nowhere but in `report.js`'s `runtime.getURL` — was
+  simply absent from the generated project and failed the v0.6.0 release.
+  `sync_extension_resources` (Fastfile) copies in and registers anything from
+  `extension/` the converter skipped, so a runtime-only file no longer has to
+  be declared in the manifest just to be bundled. Adding a file to `extension/`
+  needs no Fastfile change.
 
 ## Container app UI (`app/`)
 The container app (the home-screen icon) does nothing functional — the product

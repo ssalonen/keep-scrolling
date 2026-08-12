@@ -419,6 +419,33 @@ test('build-info.json is stamped at build time and verified in the IPA', () => {
   assert.deepEqual(listed.sort(), ['collect-report.js', 'report.html', 'report.js']);
 });
 
+test('the Fastfile bundles extension files the manifest never names', () => {
+  // The converter copies what the MANIFEST points at. build-info.json is named
+  // only in report.js's runtime.getURL, so it was absent from the generated
+  // project entirely and failed a release in apply_build_info. Nothing in
+  // extension/ may depend on being manifest-referenced to ship.
+  const named = JSON.stringify(manifest);
+  assert.ok(!named.includes('build-info.json'), 'build-info.json is deliberately not a manifest resource');
+
+  assert.ok(/def sync_extension_resources/.test(fastfile), 'sync_extension_resources must exist');
+  assert.ok(
+    /^\s*sync_extension_resources\(proj, ext\)$/m.test(fastfile),
+    'sync_extension_resources must actually be called from generate_project, with the appex target',
+  );
+  // Ordering: the stamp reads the copy the sync is responsible for putting there.
+  assert.ok(
+    fastfile.indexOf('sync_extension_resources(proj, ext)') <
+      fastfile.indexOf('apply_build_info(marketing_version, build_number)'),
+    'sync_extension_resources must run before apply_build_info',
+  );
+  // Copying is only half of it — an unreferenced file is copied and then never
+  // bundled, which is exactly the failure apply_app_ui sidesteps.
+  assert.ok(
+    /def register_resource/.test(fastfile) && /resources_build_phase/.test(fastfile),
+    'a copied-in file must also be registered in the target’s Copy Bundle Resources phase',
+  );
+});
+
 test('manifest icons exist on disk', () => {
   for (const [, file] of Object.entries(manifest.icons || {})) {
     assert.doesNotThrow(
