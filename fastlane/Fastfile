@@ -197,12 +197,16 @@ def generate_project(marketing_version, build_number)
   # 0b. Re-enable the container app's scrolling (see enable_app_scrolling).
   enable_app_scrolling
 
-  # 0c. Stamp the version the bug reporter quotes (see apply_build_info).
-  apply_build_info(marketing_version, build_number)
-
   proj = Xcodeproj::Project.open(project_path)
   app  = find_target(proj, "com.apple.product-type.application", "container app")
   ext  = find_target(proj, "com.apple.product-type.app-extension", "Safari extension appex")
+
+  # 0c. Copy in (and register) anything from extension/ the converter did not
+  #     recognise as a resource — see sync_extension_resources.
+  sync_extension_resources(proj, ext)
+
+  # 0d. Stamp the version the bug reporter quotes (see apply_build_info).
+  apply_build_info(marketing_version, build_number)
 
   # 1. Bundle identifiers. The converter builds the container app's id from
   #    --bundle-identifier's PREFIX plus --app-name, not from
@@ -307,6 +311,86 @@ def apply_app_ui(marketing_version, build_number)
   UI.message("Applied container-app UI from app/: #{dests.values.map { |p| p.sub("#{GEN_DIR}/", '') }.join(', ')}")
 end
 
+# Make sure every file in extension/ actually reached the generated appex.
+#
+# The converter does NOT copy the extension folder wholesale: it copies what the
+# *manifest* points at (content scripts, icons, the popup page and what that page
+# references). A file named only at runtime is invisible to it — report.js reads
+# build-info.json through `runtime.getURL`, nothing in the manifest mentions it,
+# and the v0.6.0 release died in apply_build_info with "found 0" because of
+# exactly that. Declaring it in the manifest just to be copied would expose it as
+# a web-accessible resource for no other reason, so sync it here instead.
+#
+# extension/ is the contract; whatever is missing gets copied in and registered,
+# rather than this guessing which files the converter happens to recognise. That
+# also covers the next runtime-only file someone adds (a popup asset, a data
+# table) without another failed release to discover it.
+def sync_extension_resources(proj, ext)
+  # Anchor on the generated manifest rather than deriving the appex's Resources
+  # path: the converter's layout is not a contract (same reasoning as
+  # apply_app_ui), but the manifest is always at the root of what it copied.
+  manifests = Dir.glob(File.join(GEN_DIR, "**", "manifest.json"))
+  if manifests.size != 1
+    UI.user_error!(
+      "Expected exactly 1 manifest.json in the generated project, found #{manifests.size}: " \
+      "#{manifests.inspect}. safari-web-extension-converter's output layout changed — update " \
+      "sync_extension_resources."
+    )
+  end
+  res_dir = File.dirname(manifests.first)
+
+  sources = Dir.glob(File.join(EXTENSION_DIR, "*")).select { |p| File.file?(p) }.sort
+  UI.user_error!("No files in #{EXTENSION_DIR} — there is no extension to ship") if sources.empty?
+
+  copied = sources.reject { |src| File.exist?(File.join(res_dir, File.basename(src))) }
+  copied.each do |src|
+    dest = File.join(res_dir, File.basename(src))
+    FileUtils.cp(src, dest)
+    register_resource(proj, ext, dest)
+  end
+
+  if copied.empty?
+    UI.message("All #{sources.size} extension/ files were copied by the converter")
+  else
+    UI.important(
+      "The converter did not copy #{copied.map { |p| File.basename(p) }.join(', ')} from extension/ " \
+      "(no manifest reference points at them) — copied and registered them in #{ext.name}'s resources."
+    )
+  end
+end
+
+# Add a file on disk to a target's Copy Bundle Resources phase.
+#
+# Copying a file into the generated tree does NOT bundle it: the project has to
+# reference it too. That is the trap apply_app_ui sidesteps by overwriting the
+# template's own files in place, and here there is no existing file to overwrite.
+#
+# The converter may reference the extension's Resources as a folder rather than
+# file by file, in which case the copy alone is enough and adding a reference
+# would give two build rules the same output ("Multiple commands produce"). Ask
+# the project which shape it emitted instead of assuming either.
+def register_resource(proj, target, path)
+  phase = target.resources_build_phase
+  return if phase.files.any? { |bf| bundles_path?(bf.file_ref, path) }
+
+  # Keep the new reference next to its siblings in the navigator when they are
+  # referenced individually; the group is cosmetic, the build phase is what ships.
+  sibling = proj.files.find { |f| bundles_path?(f, File.join(File.dirname(path), "manifest.json")) }
+  group = sibling&.parent || proj.main_group
+  phase.add_file_reference(group.new_reference(path))
+end
+
+# Does this project reference already put `path` in the bundle — either as the
+# file itself, or as a folder reference containing it?
+def bundles_path?(ref, path)
+  return false unless ref.respond_to?(:real_path)
+
+  real = ref.real_path.to_s
+  real == path || (File.directory?(real) && path.start_with?("#{real}#{File::SEPARATOR}"))
+rescue StandardError
+  false
+end
+
 # Stamp the shipped version into the extension's build-info.json.
 #
 # report.js reads this file to say which build a bug report came from. It has to
@@ -314,10 +398,10 @@ end
 # the tracked copy carries placeholders, which is exactly what a local unstamped
 # build should report.
 #
-# The converter copies extension/ wholesale into the appex's Resources, so this
-# rewrites the *generated* copy and never dirties the tracked file. Globbing for
-# the filename (rather than deriving the Resources path) follows apply_app_ui:
-# the converter's layout is not a contract.
+# This rewrites the *generated* copy (put there by the converter or by
+# sync_extension_resources) and never dirties the tracked file. Globbing for the
+# filename rather than deriving the Resources path follows apply_app_ui: the
+# converter's layout is not a contract.
 def apply_build_info(marketing_version, build_number)
   require "json"
 
@@ -325,8 +409,8 @@ def apply_build_info(marketing_version, build_number)
   if matches.size != 1
     UI.user_error!(
       "Expected exactly 1 #{BUILD_INFO_FILE} in the generated project, found #{matches.size}: " \
-      "#{matches.inspect}. It ships in extension/ and the converter copies it into the appex's " \
-      "Resources — without it every bug report would claim an unknown version."
+      "#{matches.inspect}. It ships in extension/ and sync_extension_resources copies it into the " \
+      "appex's Resources — without it every bug report would claim an unknown version."
     )
   end
 

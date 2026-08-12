@@ -82,7 +82,7 @@ commits **no project at all** — Apple's `safari-web-extension-converter`
 generates the container app + extension appex from `extension/` at build time.
 
 That moves the generate-and-patch step into the Fastfile (`generate_project`), and
-it has to fix five things the converter gets wrong or leaves unset:
+it has to fix six things the converter gets wrong or leaves unset:
 
 1. **Bundle identifiers.** The converter builds the container app's
    `PRODUCT_BUNDLE_IDENTIFIER` from `--bundle-identifier`'s **prefix** plus
@@ -172,6 +172,27 @@ it has to fix five things the converter gets wrong or leaves unset:
    too, which is why the script detects an unsubstituted footer by shape
    (`/^Version\s/`) instead of comparing against the token. `test/extension.test.js`
    enforces the "exactly once" rule.
+
+6. **Resources it cannot see.** The converter copies what the **manifest**
+   points at — the content scripts, the icons, the popup page — not the
+   `extension/` folder wholesale. A file named only at runtime is invisible to
+   it: `report.js` reads `build-info.json` through `runtime.getURL`, no manifest
+   entry mentions it, and the v0.6.0 release duly failed in `apply_build_info`
+   with *"Expected exactly 1 build-info.json … found 0"*.
+
+   The cheap fix — listing it in `web_accessible_resources` so the converter
+   notices it — would expose the file to every page just to get it copied.
+   `sync_extension_resources` instead treats `extension/` as the contract:
+   anything missing from the generated appex's `Resources` is copied in and
+   **registered with `xcodeproj`**. That second half matters, and it is the same
+   lesson as (5) from the other side — a file that is merely copied into the
+   generated tree is not bundled, and `apply_app_ui` only escapes it by
+   overwriting a file the template already references.
+
+   The converter could equally reference its `Resources` as a *folder*, where
+   the copy alone suffices and an added reference would give two build rules the
+   same output. `register_resource` asks the project which shape it emitted
+   rather than assuming, so both are handled and a second pass is a no-op.
 
 Patching a generated project is safe **because it is a build artifact** under
 `build/gen`, regenerated from scratch every run. This is the opposite of the bug

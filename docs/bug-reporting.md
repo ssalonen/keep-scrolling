@@ -105,7 +105,19 @@ exists to remove, and the tests cover both:
 `extension/build-info.json` carries placeholders (`0.0.0-dev`) in the repo and
 is rewritten in the *generated* project by `apply_build_info` (Fastfile) with
 the release version and CI build number; `verify_ipa` then asserts the shipped
-appex really carries them. `manifest.json`'s own `version` is deliberately left
+appex really carries them.
+
+Getting the file into the generated project at all took a second step. Apple's
+converter copies what the **manifest** points at, and nothing points at this
+file — `report.js` names it only at runtime, through `runtime.getURL`. So the
+first release attempt died in `apply_build_info` with *"Expected exactly 1
+build-info.json … found 0"*. Declaring it in `web_accessible_resources` would
+have made the converter copy it, at the cost of exposing it to every page for
+no other reason; instead `sync_extension_resources` copies in — and registers
+with `xcodeproj` — whatever the converter left behind, treating `extension/` as
+the contract. Copying alone would not be enough: an unreferenced file is not
+bundled, which is the same trap `apply_app_ui` avoids by overwriting the
+template's own files in place. `manifest.json`'s own `version` is deliberately left
 alone — the converter reads it on the way to `Info.plist`, which
 `generate_project` repoints at the build settings, and rewriting it after
 conversion would leave the two disagreeing.
