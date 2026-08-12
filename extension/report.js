@@ -62,6 +62,33 @@ const ISSUE_TEXT_LIMIT = 80;
 const HTML_OMITTED_NOTE = '_The sanitized page HTML did not fit in the prefilled link — '
   + 'it is on the clipboard. **Paste it here before submitting.**_';
 
+// GitHub rejects an issue body over 65 536 characters outright, so the
+// clipboard copy is budgeted as well — with headroom, because the limit is
+// counted server-side on the decoded text and there is nothing to gain from
+// sitting on the boundary.
+const BODY_BUDGET = 65000;
+
+// Room left for the truncation marker itself, and the smallest page-HTML
+// fragment worth keeping rather than dropping the block outright.
+const HTML_CUT_SLACK = 240;
+const HTML_MIN_KEEP = 2000;
+
+// How the kept part of an over-long snapshot is split between the two ends.
+// `<head>` is the smaller share: it is the same few kilobytes of preloads and
+// stylesheets on every page, while the tail is where a late-injected nag lands.
+const HTML_HEAD_SHARE = 0.25;
+
+// Cut the middle out of an over-long snapshot, keeping both ends and saying so
+// where the cut is, so nobody reads the join as the page's real markup.
+function trimMiddle(html, keep) {
+  if (typeof html !== 'string' || html.length <= keep) return html || '';
+  const head = Math.floor(keep * HTML_HEAD_SHARE);
+  const tail = keep - head;
+  const cut = html.length - keep;
+  return `${html.slice(0, head)}\n…[${cut} characters cut from the middle to fit GitHub's `
+    + `65536-character issue body — both ends kept]…\n${html.slice(html.length - tail)}`;
+}
+
 // ── Report formatting (pure — kept top-level so the tests can drive it) ──────
 
 function truncate(text, limit) {
@@ -141,64 +168,91 @@ function issueUrl(title, body) {
   return url.toString();
 }
 
-// Shrink the report until the prefilled URL fits GitHub's request-line limit,
-// dropping whole sections in increasing order of usefulness. Returns the fitted
-// body, its URL, and whether anything was lost — the caller puts the full
-// report on the clipboard whenever it was.
+// BOTH destinations are bounded, and neither bound is ours to negotiate: the
+// prefilled link dies at GitHub's request-line limit, and a pasted issue body
+// is rejected outright over 65 536 characters. So both go through the same
+// shrink, differing only in what they measure.
 //
-// Sections go whole rather than being nibbled down, because the two unbounded
-// ones are worthless in pieces. Half a page HTML is the top of <head>: link
-// tags and meta, never the nag, which sits deep in <body>. It would eat the
-// budget and tell nobody anything. The same goes for a JSON blob cut mid-key.
-// So what fits is a complete, if shorter, report — and the full one, page HTML
-// included, travels on the clipboard.
-function fitIssue(title, parts, budget) {
-  const attempt = (override) => {
-    const body = buildBody({ ...parts, ...override });
-    return { body, url: issueUrl(title, body) };
-  };
+// Sections go whole rather than being nibbled down: a JSON blob cut mid-key is
+// worse than no blob at all. The page HTML is the one exception, and only in
+// the clipboard path — see fitClipboard.
+const SECTION_ORDER = ['samples', 'diagnostics', 'pageState'];
 
-  let fitted = attempt({});
-  if (fitted.url.length <= budget) return { ...fitted, truncated: false };
+function shrink(parts, budget, measure) {
+  let body = buildBody(parts);
+  if (measure(body) <= budget) return { body, truncated: false };
 
-  // 1. The page HTML: unbounded, and the one part the clipboard carries in full.
-  const dropped = { html: '', htmlOmitted: !!parts.html };
-  fitted = attempt(dropped);
-  if (fitted.url.length <= budget) return { ...fitted, truncated: true };
-
-  // 2. The matched-signature markup: bulky, and a subset of that same HTML.
-  Object.assign(dropped, { samples: '' });
-  fitted = attempt(dropped);
-  if (fitted.url.length <= budget) return { ...fitted, truncated: true };
-
-  // 3. The overlay/component summary. Deliberately kept small enough that a
-  //    real report gets this far with it intact — it is what names an
-  //    unrecognised nag when the page HTML could not come along.
-  Object.assign(dropped, { diagnostics: '' });
-  fitted = attempt(dropped);
-  if (fitted.url.length <= budget) return { ...fitted, truncated: true };
-
-  // 4. The lock/signature state. Past here the symptoms, the user's own words
-  //    and the version are all that is left, and they are the point.
-  Object.assign(dropped, { pageState: '' });
-  fitted = attempt(dropped);
-  if (fitted.url.length <= budget) return { ...fitted, truncated: true };
-
-  // Still over budget with everything structured gone: the typed description
-  // itself is huge. Clip the body — a filed-but-shortened issue beats a 414.
-  // Each dropped character is worth up to three URL-encoded ones, so divide the
-  // overshoot by three (plus slack for the truncation marker) to guarantee the
-  // loop shrinks and terminates rather than nibbling one char at a time.
-  let { body, url } = fitted;
-  while (url.length > budget) {
-    const excess = url.length - budget;
-    const keep = body.length - Math.ceil(excess / 3) - 64;
-    body = truncate(body, Math.max(200, keep));
-    url = issueUrl(title, body);
-    if (keep < 200) break;
+  // Drop whole sections in increasing order of usefulness: the matched markup
+  // (a subset of the page HTML), then the overlay/component summary, then the
+  // lock state. Past there the symptoms, the user's own words and the version
+  // are all that is left, and they are the point.
+  const kept = { ...parts };
+  for (const section of SECTION_ORDER) {
+    if (!kept[section]) continue;
+    kept[section] = '';
+    body = buildBody(kept);
+    if (measure(body) <= budget) return { body, truncated: true };
   }
 
-  return { body, url, truncated: true };
+  // Nothing structured left to drop: the typed description itself is huge.
+  // Clip the body — a filed-but-shortened issue beats a rejected one. Convert
+  // the overshoot through the ratio the measure itself reports (about 3× for a
+  // URL-encoded body, 1× for a pasted one) so the loop shrinks by a useful
+  // amount rather than nibbling one character at a time.
+  let size = measure(body);
+  while (size > budget) {
+    const ratio = Math.max(1, size / body.length);
+    const keep = body.length - Math.ceil((size - budget) / ratio) - 64;
+    body = truncate(body, Math.max(200, keep));
+    size = measure(body);
+    if (keep < 200) break;
+  }
+  return { body, truncated: true };
+}
+
+// The prefilled link. The page HTML never fits a request line — the budget
+// holds about 2 000 characters of report — so it goes first and goes whole,
+// with a note in its place pointing at the clipboard copy.
+function fitIssue(title, parts, budget) {
+  const measure = (body) => issueUrl(title, body).length;
+
+  const whole = buildBody(parts);
+  if (measure(whole) <= budget) return { body: whole, url: issueUrl(title, whole), truncated: false };
+
+  const { body } = shrink({ ...parts, html: '', htmlOmitted: !!parts.html }, budget, measure);
+  return { body, url: issueUrl(title, body), truncated: true };
+}
+
+// The clipboard copy — the one the user actually pastes. GitHub rejects a body
+// over 65 536 characters ("Body can not be longer than 65536 characters"), so
+// this is budgeted too: a snapshot that cannot be pasted is worth no more than
+// one that was never captured.
+//
+// Here the page HTML is *trimmed* rather than dropped, because there is room
+// for tens of thousands of characters of it. It is cut from the MIDDLE,
+// keeping both ends, since that is where the evidence is: `<head>` holds the
+// preloaded module names and injected stylesheets that named both variants in
+// docs/, and the nags themselves are appended late in `<body>`. A plain prefix
+// would be all `<head>` and no nag.
+function fitClipboard(parts, budget) {
+  const body = buildBody(parts);
+  if (body.length <= budget) return { body, truncated: false };
+
+  const html = parts.html || '';
+  if (html) {
+    // What the rest of the report costs, measured with the HTML block present
+    // but empty, so the fence and <details> wrapper are counted.
+    const room = budget - buildBody({ ...parts, html: ' ' }).length - HTML_CUT_SLACK;
+    if (room > HTML_MIN_KEEP) {
+      const trimmed = buildBody({ ...parts, html: trimMiddle(html, room) });
+      if (trimmed.length <= budget) return { body: trimmed, truncated: true };
+    }
+  }
+
+  const { body: shrunk } = shrink(
+    { ...parts, html: '', htmlOmitted: !!html }, budget, (text) => text.length,
+  );
+  return { body: shrunk, truncated: true };
 }
 
 // Seeded from the first symptom the user ticked, so a report about a frozen
@@ -393,11 +447,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   // a 100 KB text node nobody is looking at.
   const disclosure = document.querySelector('details');
 
+  // What the preview shows and the Copy button copies is what the user will
+  // paste, GitHub's issue-body limit already applied — not a longer report
+  // that gets rejected on submit with "Body can not be longer than 65536
+  // characters", which is what shipping the untrimmed copy actually did.
   function refresh() {
-    const body = buildBody(parts());
-    if (disclosure.open) preview.textContent = body;
-    status.textContent = `${body.length.toLocaleString()} characters`;
-    return body;
+    const fitted = fitClipboard(parts(), BODY_BUDGET);
+    if (disclosure.open) preview.textContent = fitted.body;
+    const size = `${fitted.body.length.toLocaleString()} characters`;
+    status.textContent = fitted.truncated ? `${size} — trimmed to fit a GitHub issue` : size;
+    return fitted.body;
   }
 
   // The body now carries up to 400 KB of page HTML, so rebuilding it on every
