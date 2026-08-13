@@ -201,6 +201,16 @@
         filter: brightness(0.92);
     }
 
+    /* An action that sits inside an option card, not in the button row. */
+    button.inline {
+        flex: none;
+        margin-top: 8px;
+        padding: 8px 12px;
+        background: var(--accent);
+        color: #fff;
+        font-size: 13px;
+    }
+
     .status {
         margin: 10px 0 0;
         text-align: center;
@@ -244,6 +254,10 @@
                 <b>paste.rs</b> when you press Open GitHub issue, and the issue links to it.
                 Anyone with the link can read it and there is no guaranteed expiry. Untick to
                 keep it on your clipboard instead — then only part of it fits.</small>
+            <small id="upload-blocked" hidden>Safari has not allowed paste.rs yet. Tap below and
+                choose Allow — if this sheet closes when the prompt appears, just open it again;
+                the permission sticks.</small>
+            <button type="button" class="inline" id="allow-upload" hidden>Allow paste.rs</button>
         </span>
     </div>
 

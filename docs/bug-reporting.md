@@ -58,6 +58,40 @@ exactly one `POST`, exactly two remote URLs (the issue form and the paste
 host), the endpoint as a single named constant matching `host_permissions`, and
 no `XMLHttpRequest`, `sendBeacon`, `Authorization` or `credentials:` anywhere.
 
+### The Safari permission prompt (found on device)
+The first real report filed from a device came back **with no snapshot link**,
+and the user saw "a prompt whether to allow the extension for this site, for a
+short moment" as the GitHub tab opened. Those are one bug:
+
+1. Safari does **not** grant `host_permissions` at install. The first
+   cross-origin request to paste.rs raises a per-site permission prompt.
+2. A Safari popup is dismissed as soon as it loses focus. The prompt takes
+   focus, so the popup — and the JavaScript context running the upload — is
+   destroyed while `fetch` is still in flight.
+3. The upload therefore never resolves, the issue opens with no link, and the
+   only trace is a prompt that flashed past on the way to GitHub.
+
+The fix is to stop letting the *fetch* raise that prompt:
+
+- the popup checks `permissions.contains()` on open and, when the grant is
+  missing, shows a **standalone "Allow paste.rs" button** with an explanation.
+  Losing the popup to the prompt then costs nothing — no report is in flight —
+  and the grant persists, so the next filing just works;
+- the file button still asks first if the grant is missing, and skips the
+  upload entirely when it is refused rather than firing a request that cannot
+  succeed;
+- both paths fall back to the clipboard, as before.
+
+Every branch is recorded **in the issue body** (`uploadOutcome`): *declined by
+the reporter*, *not allowed by Safari*, or *attempted but failed*. Without that
+line, a report with no link looks the same whichever happened, and the
+difference is the entire diagnosis — the reporter exists precisely because the
+person filing cannot be asked to diagnose it.
+
+`permissions.contains`/`request` are treated as optional: a host without the
+API answers `unknown`, and the code falls through to attempting the upload,
+which is exactly the behaviour that shipped in v0.8.0.
+
 ### Why paste.rs, and what it demands of the code
 Chosen over the alternatives because it takes a raw `POST` body with no account
 and no API key (a key baked into a public client is a shared secret), returns
@@ -334,13 +368,8 @@ and be useless for bisecting a regression.
   X's cookie-consent banner. That is correct — it is read-only reporting, not
   removal — but a reader of an issue should not mistake the list for a list of
   things to remove.
-- **The upload has never run on a device.** Its HTTP behaviour was verified
-  with `curl` and the popup flow with a stubbed network, but whether Safari on
-  iOS lets an extension popup read a cross-origin response under
-  `host_permissions` — from a host that sends no CORS headers — is exactly the
-  kind of thing Safari differs on. If it fails, the symptom is the clipboard
-  fallback firing every time, which is survivable but silent about *why*; the
-  status line says "Upload failed" and no more.
+- ~~**The upload has never run on a device.**~~ It has now, and it failed, in
+  the way described below. See "The Safari permission prompt".
 - **Retention is undocumented.** paste.rs states no expiry policy, so a link in
   an old issue may or may not resolve months later. The issue text says as much
   rather than implying permanence. If snapshots start disappearing before they

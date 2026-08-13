@@ -55,6 +55,15 @@ const COLLECT_MESSAGE = 'keep-scrolling:collect';
 const SNAPSHOT_ENDPOINT = 'https://paste.rs/';
 const UPLOAD_MAX_BYTES = 393216;
 
+// Match pattern for the same host, for the permissions API. Safari does NOT
+// grant host permissions at install: the first cross-origin request raises a
+// per-site prompt — and a Safari popup is dismissed the moment it loses focus,
+// so the prompt kills the popup, the in-flight fetch never resolves, and the
+// issue arrives with no snapshot link. Asking for the grant on its own button,
+// before the report is filed, is what makes that survivable: losing the popup
+// to the prompt then costs nothing, and the grant persists for next time.
+const SNAPSHOT_ORIGIN = 'https://paste.rs/*';
+
 // The shape of a paste path, anchored at both ends: `/AbC12`, optionally with
 // a format extension. Anchoring is the point — an unanchored check would pass
 // on any path that merely contains an id-like run.
@@ -145,7 +154,7 @@ function formatEnvironment(env) {
 function buildBody(parts) {
   const {
     symptoms, description, environment, pageState, diagnostics, samples,
-    html, htmlNote, htmlOmitted, htmlLink, htmlPending, htmlPartial,
+    html, htmlNote, htmlOmitted, htmlLink, htmlPending, htmlPartial, uploadOutcome,
   } = parts;
   const chosen = symptoms || [];
   const text = (description || '').trim();
@@ -214,6 +223,11 @@ function buildBody(parts) {
     if (htmlNote) sections.push('', htmlNote);
   } else if (htmlOmitted) {
     sections.push('', '### Page HTML', '', HTML_OMITTED_NOTE);
+    // Why there is no link, recorded in the issue itself. Without this the
+    // report looks identical whether the user declined the upload, Safari
+    // never allowed it, or the host was down — and the difference is the
+    // whole diagnosis.
+    if (uploadOutcome) sections.push('', `<sub>Snapshot upload: ${uploadOutcome}.</sub>`);
   }
 
   sections.push('', '<sub>Filed from the Keep Scrolling Safari extension.</sub>');
@@ -451,6 +465,27 @@ async function uploadSnapshot(html) {
   };
 }
 
+// 'granted' | 'missing' | 'unknown'. Never throws: an older host without the
+// permissions API answers 'unknown', and the caller then just tries the upload
+// and lets it fail into the clipboard path, which is what shipped before.
+async function uploadPermission() {
+  if (!api.permissions || !api.permissions.contains) return 'unknown';
+  try {
+    return await api.permissions.contains({ origins: [SNAPSHOT_ORIGIN] }) ? 'granted' : 'missing';
+  } catch {
+    return 'unknown';
+  }
+}
+
+async function requestUploadPermission() {
+  if (!api.permissions || !api.permissions.request) return false;
+  try {
+    return await api.permissions.request({ origins: [SNAPSHOT_ORIGIN] });
+  } catch {
+    return false;
+  }
+}
+
 // ── Popup wiring ────────────────────────────────────────────────────────────
 
 async function readBuildInfo() {
@@ -526,6 +561,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   const symptomList = document.getElementById('symptoms');
   const includeHtml = document.getElementById('include-html');
   const uploadHtml = document.getElementById('upload-html');
+  const uploadBlocked = document.getElementById('upload-blocked');
+  const allowUpload = document.getElementById('allow-upload');
   const preview = document.getElementById('preview');
   const status = document.getElementById('status');
   const fileButton = document.getElementById('file');
@@ -557,10 +594,27 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Nothing to upload if there is no HTML in the report to begin with.
+  let permission = await uploadPermission();
+
   function syncUploadOption() {
     uploadHtml.disabled = !includeHtml.checked || !snapshot.html;
+    // Surface the missing grant before the user commits to filing, so the
+    // prompt happens on its own button rather than in the middle of the flow.
+    const blocked = permission === 'missing' && !uploadHtml.disabled && uploadHtml.checked;
+    uploadBlocked.hidden = !blocked;
+    allowUpload.hidden = !blocked;
   }
   syncUploadOption();
+
+  allowUpload.addEventListener('click', async () => {
+    allowUpload.disabled = true;
+    permission = await requestUploadPermission() ? 'granted' : 'missing';
+    allowUpload.disabled = false;
+    status.textContent = permission === 'granted'
+      ? 'paste.rs allowed — the snapshot will be uploaded and linked.'
+      : 'Still not allowed. You can file without it: the snapshot goes to your clipboard.';
+    syncUploadOption();
+  });
 
   const willUpload = () => includeHtml.checked && uploadHtml.checked && !!snapshot.html;
 
@@ -636,20 +690,38 @@ document.addEventListener('DOMContentLoaded', async () => {
     // rate-limits hard and can simply be down, so a failure here is expected
     // and must not cost the report: fall back to the previous behaviour.
     let uploaded = null;
+    let outcome = '';
     if (willUpload()) {
       fileButton.disabled = true;
-      status.textContent = 'Uploading the page snapshot…';
-      try {
-        uploaded = await uploadSnapshot(snapshot.html);
-      } catch {
-        status.textContent = 'Upload failed — putting the report on your clipboard instead.';
+
+      // Ask before uploading rather than letting the fetch raise the prompt:
+      // that prompt dismisses the popup, and this whole handler with it.
+      if (permission === 'missing') {
+        status.textContent = 'Asking Safari to allow paste.rs…';
+        permission = await requestUploadPermission() ? 'granted' : 'missing';
+        syncUploadOption();
+      }
+
+      if (permission === 'missing') {
+        outcome = 'not allowed by Safari for paste.rs, so the snapshot is on the reporter’s clipboard';
+        status.textContent = 'paste.rs not allowed — the report is going to your clipboard.';
+      } else {
+        status.textContent = 'Uploading the page snapshot…';
+        try {
+          uploaded = await uploadSnapshot(snapshot.html);
+        } catch {
+          outcome = 'attempted but failed (host unreachable, rate limited, or blocked)';
+          status.textContent = 'Upload failed — putting the report on your clipboard instead.';
+        }
       }
       fileButton.disabled = false;
+    } else if (includeHtml.checked && snapshot.html) {
+      outcome = 'declined by the reporter';
     }
 
     const reportParts = parts(uploaded
       ? { html: '', htmlLink: uploaded.url, htmlPartial: uploaded.partial }
-      : {});
+      : { uploadOutcome: outcome });
     const fitted = fitIssue(title, reportParts, URL_BUDGET);
 
     // What the clipboard gets, if it is needed. Built from reportParts rather
