@@ -197,6 +197,15 @@ snapshot", and iOS gives a user no way to do that. Full design:
   `credentials:`. Three places state the trade — the checkbox, the preview, and
   `app/Main.html`'s privacy card — and a test fails if the app page goes back
   to claiming nothing ever leaves.
+- IMPORTANT: Safari does **not** grant `host_permissions` at install, and its
+  popup is dismissed the moment anything takes focus. So a `fetch` that raises
+  the per-site prompt destroys the popup mid-upload — the v0.8.0 on-device
+  failure: a prompt flashed past on the way to GitHub and the issue arrived
+  with no snapshot link. The grant is therefore asked for on a **standalone
+  "Allow paste.rs" button** (losing the popup there costs nothing) and the file
+  button skips the upload when it is refused. Every no-link branch is recorded
+  in the issue as `uploadOutcome` — declined / not allowed / failed — because
+  otherwise the three are indistinguishable in a filed report.
 - IMPORTANT: paste.rs facts the code depends on, all measured rather than
   documented: **393 216 bytes** is the ceiling and past it the host answers
   `206` and keeps the paste **cut from the front** (so `trimToBytes()`

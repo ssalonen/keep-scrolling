@@ -377,8 +377,8 @@ test('the reporter sends to exactly one endpoint, and never submits the issue it
   const urls = [...new Set(code.match(/https?:\/\/[^\s'"`)]+/g) || [])].sort();
   assert.deepEqual(
     urls,
-    ['https://github.com/${REPO}/issues/new', 'https://paste.rs/'],
-    'the only remote URLs are the issue form and the snapshot host',
+    ['https://github.com/${REPO}/issues/new', 'https://paste.rs/', 'https://paste.rs/*'],
+    'the only remote URLs are the issue form, the snapshot host, and its permissions match pattern',
   );
   assert.ok(code.includes("const REPO = 'ssalonen/keep-scrolling'"), 'issues must go to this repo');
   assert.ok(
@@ -413,8 +413,23 @@ test('the upload is opt-in, previewed, and degrades to the clipboard when it fai
     'uploading must be gated on the checkbox',
   );
   assert.ok(
-    /catch \{\s*status\.textContent = 'Upload failed/.test(scriptReport),
+    scriptReport.includes("outcome = 'attempted but failed") && scriptReport.includes('Upload failed'),
     'a failed upload must fall back, not throw away the report',
+  );
+
+  // Safari does not grant host permissions at install, and its popup is
+  // dismissed the moment the resulting prompt takes focus — which is how a
+  // report arrived with no snapshot link on device. The grant has to be
+  // askable on its own button, before the filing flow depends on it.
+  assert.ok(/id="allow-upload"/.test(reportHtml), 'the popup needs a standalone Allow control');
+  assert.ok(
+    scriptReport.includes('async function requestUploadPermission')
+      && scriptReport.includes("permission === 'missing'"),
+    'the popup must ask for the paste.rs grant explicitly rather than letting the fetch raise it',
+  );
+  assert.ok(
+    scriptReport.includes('uploadOutcome: outcome'),
+    'the issue must record WHY there is no link — declined, not allowed, or failed',
   );
   // The preview is the consent step: it must say the snapshot will be sent.
   assert.ok(
@@ -631,6 +646,24 @@ test('an uploaded snapshot turns the issue into a small, complete body with a li
   // The pending state is what the preview shows before anything is sent.
   const pending = buildBody({ ...parts, htmlLink: '', htmlPending: true });
   assert.ok(/will be uploaded/i.test(pending), 'the preview must disclose the upload before it happens');
+
+  // When there is no link, the issue says which of the three reasons it was.
+  // A report that merely lacks a link cannot be told apart from one where the
+  // user declined, and the difference is the whole diagnosis.
+  const reasons = [
+    'declined by the reporter',
+    'not allowed by Safari for paste.rs, so the snapshot is on the reporter’s clipboard',
+    'attempted but failed (host unreachable, rate limited, or blocked)',
+  ];
+  for (const reason of reasons) {
+    const body = buildBody({ ...parts, htmlLink: '', htmlOmitted: true, uploadOutcome: reason });
+    assert.ok(body.includes(`Snapshot upload: ${reason}.`), `the issue must record: ${reason}`);
+    assert.ok(/paste it here/i.test(body), 'and still point at the clipboard copy');
+  }
+  assert.ok(
+    !/Snapshot upload:/.test(buildBody({ ...parts, htmlLink: '', htmlOmitted: true })),
+    'no outcome line when there was nothing to upload',
+  );
 });
 
 test('the clipboard copy fits GitHub’s hard 65536-character issue body', () => {
