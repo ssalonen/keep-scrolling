@@ -369,6 +369,19 @@ exact failure in issue #25. The control is worth keeping alongside: the same
 page *without* the content script must fail to pan, or the fixture is not
 reproducing anything.
 
+That part is now committed as **`test/scroll/`** and runs in CI:
+
+```
+node test/scroll/run.mjs                            # every known freeze shape
+node test/scroll/run.mjs https://x.com/…/status/…   # reproduce a report
+```
+
+It fetches a live URL with an iPhone user agent, pulls its stylesheets down
+beside it, blocks everything else, and pans it with and without the content
+scripts — printing how far each moved and naming the element that refused the
+drag. Adding a fixture for a new lock shape is one HTML file. See
+`test/scroll/README.md`.
+
 That run is what caught `injectStyle()` throwing on a null
 `document.documentElement` at `document_start` — an exception there aborts the
 script before the `MutationObserver` is installed, so the page gets no
