@@ -19,6 +19,8 @@ const appHtml = readFileSync(join(root, 'app', 'Main.html'), 'utf8');
 const fastfile = readFileSync(join(root, 'fastlane', 'Fastfile'), 'utf8');
 const scrollHarness = readFileSync(join(root, 'test', 'scroll', 'harness.mjs'), 'utf8');
 const scrollRunner = readFileSync(join(root, 'test', 'scroll', 'run.mjs'), 'utf8');
+const scrollMirror = readFileSync(join(root, 'test', 'scroll', 'mirror.mjs'), 'utf8');
+const ci = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8');
 // The page is one self-contained file; pull its inline script out for checks
 // that need the JS on its own.
 const appScript = (appHtml.match(/<script>([\s\S]*?)<\/script>/i) || [, ''])[1];
@@ -1315,6 +1317,23 @@ test('the scroll harness drives real touch, never a programmatic scroll', () => 
   // Touch input does not exist at all without these two.
   assert.ok(scrollHarness.includes('Emulation.setTouchEmulationEnabled'), 'touch emulation must be on');
   assert.ok(/mobile: true/.test(scrollHarness), 'the viewport must be emulated as mobile');
+});
+
+test('the harness does not run itself when node --test discovers it', () => {
+  // `node --test` treats every file under test/ as a test file and sets
+  // process.argv[1] to it, so the usual "was I run directly?" check is true
+  // there too — which made a bare `node --test` drive a browser through every
+  // fixture as a side effect, and fail on mirror.mjs printing its usage.
+  for (const [name, src] of [['run.mjs', scrollRunner], ['mirror.mjs', scrollMirror]]) {
+    assert.ok(
+      /!process\.env\.NODE_TEST_CONTEXT/.test(src),
+      `${name} must not execute under the test runner`,
+    );
+  }
+  assert.ok(
+    /node --test test\/extension\.test\.js/.test(ci),
+    'CI must scope the unit tests to the file that holds them',
+  );
 });
 
 test('every scroll fixture emulates a phone viewport', () => {

@@ -1,10 +1,33 @@
 # Scroll harness — can a finger actually pan the page?
 
 ```
-node test/scroll/run.mjs                       # the committed fixtures
-node test/scroll/run.mjs snapshot.html         # a page from a bug report
-node test/scroll/run.mjs https://x.com/…/status/…   # a live page
+node test/scroll/run.mjs                            # the committed fixtures
+node test/scroll/run.mjs snapshot.html              # a page from a bug report
+node test/scroll/run.mjs https://x.com/…/status/…   # a live page, no JS
+node test/scroll/run.mjs https://x.com/…  --with-js # …running its real bundle
 ```
+
+Run the unit tests as `node --test test/extension.test.js`, **not** a bare
+`node --test`: Node treats every file under `test/` as a test file, so a bare
+run also imports this harness.
+
+## `--with-js`: the site's own code, offline
+
+Plain URL mode blocks every request, so the site's client never runs — enough
+for a server-rendered cover, not enough for a lock applied from a React effect.
+`--with-js` mirrors the page and its whole module graph (`mirror.mjs`), serves
+it from localhost, and lets it hydrate with nothing else reachable. On X that
+reproduces the blocking modal *and* its `touch-action: none`, with X's real
+bundle executing:
+
+```
+without:    0px  of 590px available, blocked by none on <div … data-interaction="app-store-obstruction" class="… touch-none …">
+with:     590px  of 590px available
+```
+
+It does **not** reproduce anything needing the site's API — X's conversation
+query fails, so the reply list stays as the placeholders the server rendered.
+A faithful copy of the *document*, not of a session.
 
 Needs a Chrome/Chromium binary (`CHROME_PATH` overrides the search). No npm
 dependencies — it speaks CDP over Node's global `WebSocket`, in the same
@@ -86,6 +109,18 @@ One file per freeze mechanism this extension has actually met:
 Adding one is a single HTML file; `run.mjs` picks up everything in `fixtures/`.
 When a new lock shape turns up, add the fixture **first** and watch the control
 fail to pan — that is the proof you have reproduced it before you fix it.
+
+## The engine caveat
+
+This drives **Chromium**. iPhones run **WebKit**, and the two do not agree about
+everything that matters here — `touch-action` handling, `-webkit-overflow-
+scrolling`, rubber-banding at the document edge. A green run is evidence, not
+proof, that a fix works on a phone.
+
+Where a closer engine is available, use it: `npx playwright install webkit` and
+drive the same fixtures through it, or open the page on the device itself with
+Safari Web Inspector from a Mac. Until then, an on-device check stays the last
+word on any scrolling fix.
 
 ## Reading a report with it
 

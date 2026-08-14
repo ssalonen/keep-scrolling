@@ -24,9 +24,20 @@ frozen page.
 
 ```
 node test/scroll/run.mjs                            # committed fixtures
-node test/scroll/run.mjs https://x.com/…/status/…   # a live page
+node test/scroll/run.mjs https://x.com/…/status/…   # a live page, no JS
+node test/scroll/run.mjs https://x.com/…  --with-js # …running its real bundle
 node test/scroll/run.mjs snapshot.html              # a page from a bug report
 ```
+
+Reach for `--with-js` whenever the suspected lock is applied by the site at
+runtime rather than server-rendered: it mirrors the page's whole module graph,
+serves it from localhost and lets it hydrate offline. (A browser often cannot
+use an agent HTTPS_PROXY even when `curl` can — mirroring with Node's `fetch`
+sidesteps that entirely.)
+
+**This drives Chromium; iPhones run WebKit.** A green run is evidence, not
+proof. Say which engine a result came from, and treat an on-device check as the
+last word on any scrolling fix.
 
 Every case runs twice — without the content script and with it — and prints how
 far each panned plus the lock state and the element that blocked the drag. Needs

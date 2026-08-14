@@ -5,6 +5,14 @@
 //   node test/scroll/run.mjs                 the committed fixtures
 //   node test/scroll/run.mjs snapshot.html   a page from a bug report
 //   node test/scroll/run.mjs https://x.com/…/status/…   a live page
+//   node test/scroll/run.mjs https://x.com/…  --with-js  mirror it and run the
+//                                                        site's real bundle
+//
+// Plain URL mode blocks every request, so the site's own client code never
+// runs — enough for a server-rendered cover, not enough for a lock a site
+// applies from a React effect. --with-js mirrors the page and its whole module
+// graph to a temp directory, serves it from localhost, and lets it hydrate with
+// no internet reachable. See mirror.mjs for what that does and does not copy.
 //
 // Every case is run twice: once WITHOUT the content script, once WITH it. Both
 // halves are assertions. A frozen fixture that pans in the control is not
@@ -23,6 +31,7 @@ import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { findChrome } from './cdp.mjs';
 import { panTest } from './harness.mjs';
+import { mirror, serve } from './mirror.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..', '..');
@@ -58,8 +67,16 @@ const NOT_MUCH_PAGE = 120;
 // A live or captured page keeps its stylesheets — without them the Tailwind
 // classes that carry `touch-action: none` are inert and the page pans happily,
 // so the fixture reproduces nothing. Everything else stays blocked.
-async function materialize(target) {
+async function materialize(target, withJs) {
   if (!/^https?:/.test(target)) return { url: pathToFileURL(resolve(target)).href, offline: true };
+
+  if (withJs) {
+    const dir = mkdtempSync(join(tmpdir(), 'keep-scrolling-mirror-'));
+    await mirror(target, dir, { log: (line) => console.log(`  ${line}`) });
+    const server = await serve(dir);
+    // settle: the site has to boot and mount before a drag means anything.
+    return { url: `${server.origin}/index.html`, allowOrigin: server.origin, settle: 6000, server };
+  }
 
   const dir = mkdtempSync(join(tmpdir(), 'keep-scrolling-page-'));
   const res = await fetch(target, { headers: { 'User-Agent': IPHONE_UA, 'Accept-Language': 'en' } });
@@ -90,10 +107,12 @@ const EXPECT = {
 };
 const DEFAULT_EXPECT = 'frozen'; // stuck without the scripts, panning with them
 
-async function runCase(name, target, expect) {
-  const { url, offline } = await materialize(target);
-  const control = await panTest({ url, offline });
-  const fixed = await panTest({ url, offline, inject: CONTENT_SCRIPTS });
+async function runCase(name, target, expect, withJs = false) {
+  const { url, offline, allowOrigin, settle, server } = await materialize(target, withJs);
+  const opts = { url, offline, allowOrigin, settle };
+  const control = await panTest(opts);
+  const fixed = await panTest({ ...opts, inject: CONTENT_SCRIPTS });
+  if (server) server.close();
 
   const controlPanned = control.moved >= PANNED;
   const fixedPanned = fixed.moved >= PANNED;
@@ -134,15 +153,17 @@ async function main() {
     process.exit(77);
   }
 
-  const [target] = process.argv.slice(2);
+  const args = process.argv.slice(2);
+  const withJs = args.includes('--with-js');
+  const [target] = args.filter((a) => !a.startsWith('--'));
   let results = [];
 
   if (target) {
     // A page from a bug report, or a live one. We do not know whether it is
     // stuck, so the control is reported but not asserted — reading it IS the
     // diagnosis.
-    console.log(`Panning ${target}\n`);
-    results.push(await runCase(target, target, 'report'));
+    console.log(`Panning ${target}${withJs ? ' (mirrored, running its real JavaScript)' : ''}\n`);
+    results.push(await runCase(target, target, 'report', withJs));
   } else {
     const dir = join(HERE, 'fixtures');
     for (const file of readdirSync(dir).filter((f) => f.endsWith('.html')).sort()) {
@@ -155,4 +176,9 @@ async function main() {
   process.exit(failed ? 1 : 0);
 }
 
-main().catch((err) => { console.error(err); process.exit(1); });
+// Only when run as a command — see mirror.mjs. Without this, `node --test`
+// drives a browser through every fixture as a side effect of discovering files.
+const RUN_DIRECTLY = !process.env.NODE_TEST_CONTEXT
+  && process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (RUN_DIRECTLY) main().catch((err) => { console.error(err); process.exit(1); });

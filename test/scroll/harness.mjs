@@ -80,12 +80,15 @@ const PROBE = `(() => {
  * Load a page and try to pan it with a real touch drag.
  *
  * @param {object}  opts
- * @param {string}  opts.url        page to load (file:// or http(s)://)
- * @param {string} [opts.inject]    content-script source to run at document_start
- * @param {boolean}[opts.offline]   block every request except the page itself
+ * @param {string}  opts.url          page to load (file:// or http(s)://)
+ * @param {string} [opts.inject]      content-script source to run at document_start
+ * @param {boolean}[opts.offline]     block every request except the page itself
+ * @param {string} [opts.allowOrigin] allow requests to this origin only, so a
+ *   mirrored copy can run the site's real JavaScript with no internet
+ * @param {number} [opts.settle]      ms to wait before dragging (hydration)
  * @returns {Promise<{moved:number, before:number, after:number, ...probe}>}
  */
-export async function panTest({ url, inject, offline = true }) {
+export async function panTest({ url, inject, offline = true, allowOrigin, settle = 400 }) {
   const browser = await launch(VIEWPORT);
   try {
     const page = await newPage(browser);
@@ -98,7 +101,18 @@ export async function panTest({ url, inject, offline = true }) {
     });
     await page.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
 
-    if (offline) {
+    if (allowOrigin) {
+      // Everything the mirrored copy needs is same-origin; anything else is the
+      // live site leaking back in, which would make the run non-reproducible.
+      // Blocklists cannot express "all but this one origin", so gate each
+      // request instead.
+      await page.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
+      page.on('Fetch.requestPaused', ({ requestId, request }) => {
+        const allowed = request.url.startsWith(allowOrigin) || request.url.startsWith('data:');
+        page.send(allowed ? 'Fetch.continueRequest' : 'Fetch.failRequest',
+          allowed ? { requestId } : { requestId, errorReason: 'BlockedByClient' }).catch(() => {});
+      });
+    } else if (offline) {
       await page.send('Network.enable');
       await page.send('Network.setBlockedURLs', { urls: ['http://*', 'https://*'] });
     }
@@ -109,8 +123,8 @@ export async function panTest({ url, inject, offline = true }) {
 
     const loaded = new Promise((resolve) => page.on('Page.loadEventFired', resolve));
     await page.send('Page.navigate', { url });
-    await Promise.race([loaded, new Promise((r) => setTimeout(r, 15000))]);
-    await new Promise((r) => setTimeout(r, 400));
+    await Promise.race([loaded, new Promise((r) => setTimeout(r, 30000))]);
+    await new Promise((r) => setTimeout(r, settle));
 
     const before = await evaluate(page, 'window.scrollY');
     await drag(page);

@@ -43,6 +43,9 @@ the independent `extension/block-x-nag.js`. Full background and references:
   `Matchfile`. Signing + release live here, not in workflow bash.
 - `Gemfile` — pins fastlane.
 - `test/extension.test.js` — `node:test` invariant guards (no dependencies).
+  Run them with `node --test test/extension.test.js`, not a bare `node --test`:
+  Node treats every file under `test/` as a test file, so a bare run also
+  imports the browser harness.
 - `test/scroll/` — the touch-scroll harness: drives a real finger drag over CDP
   against one fixture per known freeze shape, asserting each is stuck WITHOUT
   the content script and pans WITH it. Also takes a bug report's URL or
@@ -56,7 +59,7 @@ the independent `extension/block-x-nag.js`. Full background and references:
 
 ## Build / release / test
 - **CI** (`ci.yml`): on every push/PR, syntax-checks the extension scripts,
-  parses the JSON resources, and runs `node --test`. A second job runs the
+  parses the JSON resources, and runs `node --test test/extension.test.js`. A second job runs the
   touch-scroll harness (`node test/scroll/run.mjs`) — the invariant tests pin
   the shape of the code, only the harness answers whether a finger can move the
   page. It is deliberately *not* a dependency of the release: it needs a
