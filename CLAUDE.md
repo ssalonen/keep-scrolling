@@ -105,9 +105,10 @@ host; the live variant is `-seo`, so its fog and scroll-lock pass through.
 ## X/Twitter nag (`extension/block-x-nag.js`)
 Removes X's logged-out "Open X App" bottom banner (an `<aside>` containing
 `a[download][href*="launch_app_store=true"]`, component internally named
-`logged-out-open-app-banner`), the blocking "See this post in the app" modal
-(`[data-interaction^="app-store-obstruction"]`), and releases the body's
-inline `overflow:hidden` scroll lock. This is an independent content script
+`logged-out-open-app-banner`), the top-bar "Open app" pill, and the blocking
+"See this post in the app" modal
+(`[data-interaction^="app-store-obstruction"]`), and releases the page's
+inline scroll lock. This is an independent content script
 scoped to `*://*.x.com/*` and `*://*.twitter.com/*` — it deliberately does
 **not** share code with the Reddit script (see `docs/x-nag-remover-plan.md`
 for why).
@@ -121,30 +122,61 @@ for why).
   uses that same shape for the share menu and other legitimate dialogs.
   `test/extension.test.js` guards this.
 
-- Match by the `download` + `launch_app_store=true` marker on the anchor,
-  then `.closest('aside')` to remove the whole banner — NOT by the
-  surrounding Tailwind utility classes (cosmetic, retouch-prone) and NOT by
-  bare `<aside>` or `role="region"` — the page also has an unrelated,
-  legally-required cookie-consent banner that must never be touched.
-- IMPORTANT: only remove the whole `<aside>` when `getComputedStyle(aside).
+- IMPORTANT: the script **hides** nags (`data-xnr-hidden` + a rule in its own
+  stylesheet); it does not remove them. X now **server-renders** the blocking
+  modal, so deleting it at `document_start` deletes a node React is about to
+  hydrate against — the reply list comes back as permanent "Loading post"
+  skeletons and the post page ends after three replies, which a reader
+  experiences as *the page will not scroll* (issue #25). Hiding is invisible to
+  React, leaves X's own dismiss/unlock path intact, and cannot take
+  surrounding content with it. A data attribute + stylesheet rather than an
+  inline style, so a re-render does not undo it.
+- IMPORTANT: do **not** require the `download` attribute. It was the banner's
+  marker up to v0.8.x and X has since dropped it from every app-store link —
+  `a[download][href*="launch_app_store=true"]` matched *nothing* on the shipped
+  page, so the banner and the top-bar pill went unhandled. The surviving marker
+  is `launch_app_store=true` plus X's own `ct=` surface name; `isNagLink()`
+  treats a link as a nag unless its `ct` starts with `engagement` (see the
+  engagement-controls note below). Known values: `ct=post-modal` (the blocking
+  modal's CTA), `ct=post-timeline` (the bottom banner), no `ct` at all (the
+  top-bar "Open app" pill).
+- Match by that marker, then `.closest('aside')` to hide the whole banner —
+  NOT by the surrounding Tailwind utility classes (cosmetic, retouch-prone)
+  and NOT by bare `<aside>` or `role="region"` — the page also has an
+  unrelated, legally-required cookie-consent banner that must never be touched.
+- IMPORTANT: only hide the whole `<aside>` when `getComputedStyle(aside).
   position === 'fixed'` (the banner's actual shape). An on-device test found
   that blindly removing any `<aside>` ancestor took out an in-flow reply-list
   region along with it, permanently stalling reply pagination — anchor-only
-  removal is the safe fallback when the ancestor isn't the floating banner.
+  hiding is the safe fallback when the ancestor isn't the floating banner.
+- IMPORTANT: `hideNags()` must run **before** `defuseAppStoreLinks()` in
+  `run()`. The param the latter strips is the marker the former matches on.
+  The hide itself survives (it is recorded on the node, not re-derived each
+  pass), but the order is what lets a freshly rendered nag be recognised.
 - IMPORTANT: `releaseScroll()` runs on **every** pass, like Reddit's — it is
   no longer gated on "a nag was found this pass". That gate was the v0.6.x
   freeze: X locks the page from prompts carrying none of our markers, so the
   gate never opened and the page stayed frozen with nothing on screen to
   explain it. A background that scrolls behind an open share sheet is a far
   cheaper failure than a page that cannot scroll at all.
-- IMPORTANT: the lock has **two shapes** and both must be undone. The
-  original is inline `overflow:hidden` on `<body>`. The newer one comes from
-  `vaul`, the drawer library X now ships (its stylesheet,
-  `[data-vaul-drawer]{touch-action:none…}`, is injected into logged-out post
-  pages): `position:fixed !important` plus `top/left/right/height`, with the
-  scroll offset stashed in a negative `top`. Clear that whole set together
-  **and** `window.scrollTo` back to `-top` — dropping `position` alone
-  releases the scroll but teleports the reader to the top of the thread.
+- IMPORTANT: the lock has had **four shapes** across four X builds and all of
+  them must be undone. (1) inline `overflow:hidden` on `<body>`. (2) `vaul`,
+  the drawer library X shipped for a while: `position:fixed !important` plus
+  `top/left/right/height`, with the scroll offset stashed in a negative `top`
+  — clear that whole set together **and** `window.scrollTo` back to `-top`, as
+  dropping `position` alone releases the scroll but teleports the reader to the
+  top of the thread. (3) and (4) come from **Base UI**, the popup library X has
+  since moved its logged-out prompts onto (`useAnchoredPopupScrollLock`,
+  `usePopupHandleStore`, `useRenderElement` in the page's preloads): on mobile
+  Safari, where there is no scrollbar to compensate for, it just sets inline
+  `overflow-x`/`overflow-y: hidden`; otherwise it marks `<html>` with its own
+  `data-base-ui-scroll-locked` and moves the scroll onto `<body>` as a
+  `position:relative`, `100dvh`×`100vw`, `border-box` box with the reader's
+  offset parked in `body.scrollTop`. Clearing `overflow` alone leaves that body
+  clamped to a single viewport — released, and still unscrollable — so
+  `releaseBaseUiLock()` clears the whole set, and runs **first**, because it
+  has to read `body.scrollTop` back before the styles that make body scrollable
+  come off.
 - `releaseScroll()` only ever clears *inline* values (never computed ones), so
   a stylesheet-driven overflow rule — X's own layout — is left alone. It also
   clears an inline `pointer-events:none`, which is how the blocking modal
@@ -154,24 +186,29 @@ for why).
   first `run()` aborts the script *before* the `MutationObserver` is
   installed — silently disabling the extension for the whole page load. Both
   scripts bail out and retry on a later pass instead.
-- The injected CSS backstop uses `:has()` (iOS/Safari 16.4+); the JS
-  `killNags()` removal path via `MutationObserver` doesn't depend on it and
-  still works on older iOS, just without the early-hide race protection.
-- **Best-effort first pass**: derived from a single static HTML snapshot, not
-  yet verified on-device. If a variant slips through, capture a fresh
-  snapshot, confirm the anchor still has `download` + `launch_app_store=true`
-  (or find its new marker), and update `APP_BANNER_LINK_SELECTOR` — same
-  one-line-of-maintenance goal as Reddit's `NAG_SELECTORS`.
+- The injected CSS is what actually hides things now, and the two rules that
+  matter — `[data-xnr-hidden]` and `[data-interaction^="app-store-obstruction"]`
+  — are plain attribute selectors, so they work below iOS 16.4 too. Only the
+  `body:has(…) { overflow:auto }` unlock still needs `:has()` (16.4+), and
+  `releaseScroll()` covers the same ground without it.
+- **Maintenance loop**: if a variant slips through, capture a fresh snapshot,
+  find the anchor's current marker, and update `isNagLink()` /
+  `APP_STORE_LINK_SELECTOR` — same one-line-of-maintenance goal as Reddit's
+  `NAG_SELECTORS`. The current rules are verified against a live
+  server-rendered `x.com` status page, not on-device.
 - IMPORTANT: the app-install nag isn't only the `<aside>` banner. Every
   logged-out engagement control (Reply/Repost/Like/Bookmark, and a reply
   row's whole-row tap target) carries `launch_app_store=true` in its
-  `href`/`data-href` — X's own signal to bounce that tap to the App Store,
-  with no `download` attribute, so `killNags()` never touches it.
+  `href`/`data-href` — X's own signal to bounce that tap to the App Store.
+  These are controls the reader meant to tap, so `hideNags()` must never hide
+  them; `ct=engagement_*` is exactly what keeps `isNagLink()` off them.
   `defuseAppStoreLinks()` strips just that param (via `stripAppStoreParam()`)
   from any matching `href`/`data-href`, leaving the rest of the URL (e.g.
-  `ct=engagement_reply`) intact, and runs on every pass alongside
-  `killNags()`. **Unverified on-device** whether removing the param actually
-  suppresses the bounce — see `docs/x-nag-remover-plan.md`.
+  `ct=engagement_reply`) intact, and runs on every pass after `hideNags()`.
+  **Unverified on-device** whether removing the param actually suppresses the
+  bounce — and X now also preloads `redirect-to-app-store` and
+  `engagement-intercept-provider`, which suggests the bounce has a JS path the
+  param strip cannot reach. See `docs/x-nag-remover-plan.md`.
 
 ## Bug reporting (`extension/report.*`, `extension/collect-report.js`)
 A toolbar popup (Safari's **ᴀA** menu ▸ Keep Scrolling) lets a user tick which

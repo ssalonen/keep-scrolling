@@ -231,7 +231,13 @@ so a bug in the reporter can never break browsing.
   the union of both scripts' signature lists (over-matching is harmless here:
   nothing is removed). It also carries `[data-vaul-drawer]`, which neither
   script removes — a page locked by a drawer we have no selector for is exactly
-  the case this reporter exists for.
+  the case this reporter exists for — and `[data-base-ui-scroll-locked]`, the
+  marker the library X moved onto after `vaul` sets while its lock is in force.
+  That one names the lock itself, which no amount of `html`/`body` inline style
+  can reveal once the nag script has already cleared it. `[data-xnr-hidden]` is
+  in the list for the opposite reason: it says what the X script *did* match, so
+  "we never recognised it" and "we hid it and it is still on screen" stay
+  distinguishable in a report.
 - `overlays` — every **pinned element covering ≥10 % of the viewport**, biggest
   first: its opening tag, computed `z-index`/`pointer-events`/`touch-action`,
   and its visible text. Every nag either script has had to remove is that

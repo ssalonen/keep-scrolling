@@ -64,11 +64,19 @@
     'a[download][href*="launch_app_store=true"]',
     '[href*="launch_app_store=true"]',
     '[data-href*="launch_app_store=true"]',
-    // Not a removal signature for either script — the drawer library X moved
-    // its logged-out prompts onto. Reported because a page locked by a drawer
-    // we have no selector for is exactly the case this reporter exists for.
+    // What the X script marked as a nag and hid. Reported so "we never matched
+    // it" and "we hid it and it is still on screen" stay distinguishable.
+    '[data-xnr-hidden]',
+    // Not removal signatures for either script — the libraries X has moved its
+    // logged-out prompts onto, first `vaul` and now Base UI. Reported because a
+    // page locked by a prompt we have no selector for is exactly the case this
+    // reporter exists for; data-base-ui-scroll-locked in particular names the
+    // lock itself, which no amount of html/body inline style would reveal once
+    // the nag script has already cleared it.
     '[data-vaul-drawer]',
     '[data-vaul-overlay]',
+    '[data-base-ui-scroll-locked]',
+    '[data-base-ui-inert]',
   ];
 
   // The marker stylesheets the two nag scripts inject. Their presence is proof
