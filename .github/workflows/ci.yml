@@ -42,6 +42,41 @@ jobs:
       - name: Run invariant tests
         run: node --test
 
+  # ── Can a finger actually pan the page? ────────────────────────────────────
+  # The invariant tests above pin the shape of the code; they cannot tell you
+  # whether the page moves. Issue #25 was a full-screen touch-action:none cover
+  # over a document that reported scrollable:true with no lock anywhere — every
+  # programmatic scroll walks straight past that, so this job drives real touch
+  # events against a browser. Each fixture is asserted twice: frozen WITHOUT the
+  # content script, panning WITH it. See test/scroll/README.md.
+  #
+  # Separate from `test` and deliberately NOT a dependency of the release: it
+  # needs a browser, and a runner without one should not block a release.
+  # ubuntu-latest ships Chrome; the harness exits 77 (skip) if it ever stops.
+  scroll:
+    name: Touch-scroll harness
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Pan every fixture, with and without the content scripts
+        run: |
+          # `|| status=$?` because the default shell is `bash -e`: a bare
+          # non-zero exit would abort before the 77-is-a-skip check below.
+          status=0
+          node test/scroll/run.mjs || status=$?
+          if [ "$status" = "77" ]; then
+            echo "::warning::No browser on this runner — scroll harness skipped."
+            exit 0
+          fi
+          exit "$status"
+
   # ── Auto-release on green main ─────────────────────────────────────────────
   # Runs only after the test job passes on a push to main. Computes the next
   # semantic version from Conventional Commits since the last release tag:

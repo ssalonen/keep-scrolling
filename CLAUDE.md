@@ -43,6 +43,12 @@ the independent `extension/block-x-nag.js`. Full background and references:
   `Matchfile`. Signing + release live here, not in workflow bash.
 - `Gemfile` — pins fastlane.
 - `test/extension.test.js` — `node:test` invariant guards (no dependencies).
+- `test/scroll/` — the touch-scroll harness: drives a real finger drag over CDP
+  against one fixture per known freeze shape, asserting each is stuck WITHOUT
+  the content script and pans WITH it. Also takes a bug report's URL or
+  snapshot. No dependencies either — see `test/scroll/README.md`.
+- `.claude/skills/verify-scrolling/` — when to reach for that harness, and the
+  one rule it exists to enforce.
 - `docs/reddit-nag-remover-plan.md` — Reddit diagnosis, build steps, references.
 - `docs/x-nag-remover-plan.md` — X/Twitter diagnosis and caveats.
 - `docs/bug-reporting.md` — the in-Safari bug reporter: design, redaction, caveats.
@@ -50,8 +56,18 @@ the independent `extension/block-x-nag.js`. Full background and references:
 
 ## Build / release / test
 - **CI** (`ci.yml`): on every push/PR, syntax-checks the extension scripts,
-  parses the JSON resources, and runs `node --test`. On a green push to `main`, computes the next semver from
-  Conventional Commits and triggers a release.
+  parses the JSON resources, and runs `node --test`. A second job runs the
+  touch-scroll harness (`node test/scroll/run.mjs`) — the invariant tests pin
+  the shape of the code, only the harness answers whether a finger can move the
+  page. It is deliberately *not* a dependency of the release: it needs a
+  browser, and a runner without one should not block one. On a green push to
+  `main`, computes the next semver from Conventional Commits and triggers a
+  release.
+- IMPORTANT: to test **scrolling**, drive touch. `window.scrollBy()`,
+  `scrollIntoView()`, wheel events and `Input.synthesizeScrollGesture` all
+  ignore `touch-action`, so they pass happily against a page no finger can move
+  — which is what issue #25 was. `node test/scroll/run.mjs` does it properly;
+  reach for it via the `verify-scrolling` skill.
 - **Release** (`release.yml`): on a `v*` tag (or `workflow_call`), a macOS `build`
   job runs `bundle exec fastlane beta` — generate the Xcode project from
   `extension/`, sync signing with `match`, archive/export a **signed App Store

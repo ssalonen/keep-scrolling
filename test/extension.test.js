@@ -4,7 +4,7 @@
 // remove the blocking sheet AND release the body scroll-lock.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -17,6 +17,8 @@ const reportHtml = readFileSync(join(root, 'extension', 'report.html'), 'utf8');
 const manifest = JSON.parse(readFileSync(join(root, 'extension', 'manifest.json'), 'utf8'));
 const appHtml = readFileSync(join(root, 'app', 'Main.html'), 'utf8');
 const fastfile = readFileSync(join(root, 'fastlane', 'Fastfile'), 'utf8');
+const scrollHarness = readFileSync(join(root, 'test', 'scroll', 'harness.mjs'), 'utf8');
+const scrollRunner = readFileSync(join(root, 'test', 'scroll', 'run.mjs'), 'utf8');
 // The page is one self-contained file; pull its inline script out for checks
 // that need the JS on its own.
 const appScript = (appHtml.match(/<script>([\s\S]*?)<\/script>/i) || [, ''])[1];
@@ -1287,5 +1289,64 @@ test('app UI keeps the enable instructions, the one thing a user must act on', (
   for (const cls of ['platform-ios-only', 'platform-mac-only']) {
     // Once in the markup, once in the inline CSS that hides/shows it.
     assert.ok(countOccurrences(appHtml, cls) >= 2, `missing platform switching for ${cls}`);
+  }
+});
+
+// ── Scroll harness (test/scroll) ──────────────────────────────────────────
+// The harness needs a browser, so it runs separately (`node test/scroll/run.mjs`).
+// What CAN be guarded here for free is the one thing that makes it worth having.
+
+test('the scroll harness drives real touch, never a programmatic scroll', () => {
+  // window.scrollBy / scrollIntoView / wheel / synthesizeScrollGesture all
+  // ignore touch-action, so a harness built on them passes happily against a
+  // page no finger can move — which is precisely issue #25. Only
+  // Input.dispatchTouchEvent goes through the path that honours it.
+  assert.ok(
+    scrollHarness.includes('Input.dispatchTouchEvent'),
+    'the harness must drive touch events over CDP',
+  );
+  const code = scrollHarness.replace(/^\s*\/\/.*$/gm, '');
+  for (const fake of ['window.scrollBy', 'scrollIntoView', 'synthesizeScrollGesture', 'dispatchMouseEvent']) {
+    assert.ok(
+      !code.includes(fake),
+      `${fake} does not exercise touch-action — it would pass against a frozen page`,
+    );
+  }
+  // Touch input does not exist at all without these two.
+  assert.ok(scrollHarness.includes('Emulation.setTouchEmulationEnabled'), 'touch emulation must be on');
+  assert.ok(/mobile: true/.test(scrollHarness), 'the viewport must be emulated as mobile');
+});
+
+test('the scroll harness asserts the control, not just the fix', () => {
+  // A freeze fixture that pans WITHOUT the content script is not reproducing
+  // anything, and a fix measured against it has been measured wrong.
+  assert.ok(
+    /the control panned .* not reproducing a freeze/.test(scrollRunner),
+    'a fixture whose control pans must fail the run',
+  );
+  assert.ok(
+    /the harness itself is broken/.test(scrollRunner),
+    'the plain fixture must fail the run if it stops panning',
+  );
+  assert.ok(
+    /process\.exit\(77\)/.test(scrollRunner),
+    'must exit 77 (skip) with no browser, so `node --test` stays dependency-free',
+  );
+});
+
+test('every documented freeze shape has a scroll fixture', () => {
+  const fixtures = readdirSync(join(root, 'test', 'scroll', 'fixtures'))
+    .filter((name) => name.endsWith('.html'));
+  // One per mechanism the extension has actually met, plus the plain control.
+  for (const required of [
+    'plain.html',              // nothing wrong — proves the harness can pan
+    'touch-action-cover.html', // issue #25
+    'inline-touch-action.html',
+    'overflow-hidden.html',    // the original inline lock
+    'vaul-pinned.html',        // vaul's position:fixed pin
+    'base-ui-mobile.html',     // Base UI, no-scrollbar path
+    'base-ui-desktop.html',    // Base UI, scrollbar path
+  ]) {
+    assert.ok(fixtures.includes(required), `missing scroll fixture: ${required}`);
   }
 });

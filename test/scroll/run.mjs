@@ -1,0 +1,132 @@
+#!/usr/bin/env node
+// run.mjs — does the page actually pan, and did the content script make the
+// difference?
+//
+//   node test/scroll/run.mjs                 the committed fixtures
+//   node test/scroll/run.mjs snapshot.html   a page from a bug report
+//   node test/scroll/run.mjs https://x.com/…/status/…   a live page
+//
+// Every case is run twice: once WITHOUT the content script, once WITH it. Both
+// halves are assertions. A frozen fixture that pans in the control is not
+// reproducing anything, and a fix that "passes" against a page which was never
+// stuck has been measured wrong — that is exactly how issue #25 got shipped
+// past a green test run.
+//
+// Needs a Chrome/Chromium binary; set CHROME_PATH if it is somewhere unusual.
+// Exits 0 if every case behaved, 1 if any did not, and 77 (skipped) if there is
+// no browser to drive — `node --test` stays dependency-free and this stays
+// optional.
+
+import { readFileSync, readdirSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, dirname, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { findChrome } from './cdp.mjs';
+import { panTest } from './harness.mjs';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const ROOT = resolve(HERE, '..', '..');
+const IPHONE_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 '
+  + '(KHTML, like Gecko) Version/26.6 Mobile/15E148 Safari/604.1';
+
+// Both nag scripts, exactly as Safari would run them. A fixture is normally
+// about one of them, but running both mirrors the shipped extension and costs
+// nothing.
+const CONTENT_SCRIPTS = ['block-reddit-nag.js', 'block-x-nag.js']
+  .map((name) => readFileSync(join(ROOT, 'extension', name), 'utf8'))
+  .join('\n;\n');
+
+// A pan of less than this is a rounding artefact, not a scroll.
+const PANNED = 50;
+
+function describe(r) {
+  const bits = [
+    `scrollable=${r.scrollable}`,
+    `html.overflow-y=${r.htmlOverflowY}`,
+    `body.overflow-y=${r.bodyOverflowY}`,
+  ];
+  if (r.blocker) bits.push(`blocked by ${r.blocker.touchAction} on ${r.blocker.tag}`);
+  return bits.join(', ');
+}
+
+// A live or captured page keeps its stylesheets — without them the Tailwind
+// classes that carry `touch-action: none` are inert and the page pans happily,
+// so the fixture reproduces nothing. Everything else stays blocked.
+async function materialize(target) {
+  if (!/^https?:/.test(target)) return { url: pathToFileURL(resolve(target)).href, offline: true };
+
+  const dir = mkdtempSync(join(tmpdir(), 'keep-scrolling-page-'));
+  const res = await fetch(target, { headers: { 'User-Agent': IPHONE_UA, 'Accept-Language': 'en' } });
+  let html = await res.text();
+  const hrefs = [...new Set(
+    [...html.matchAll(/<link[^>]+rel="stylesheet"[^>]+href="(https?:\/\/[^"]+)"/g)].map((m) => m[1]),
+  )];
+  for (const [index, href] of hrefs.entries()) {
+    const name = `sheet-${index}.css`;
+    try {
+      const css = await (await fetch(href, { headers: { 'User-Agent': IPHONE_UA } })).text();
+      writeFileSync(join(dir, name), css);
+      html = html.split(href).join(name);
+    } catch { /* leave the remote href; it will simply be blocked */ }
+  }
+  const file = join(dir, 'page.html');
+  writeFileSync(file, html);
+  return { url: pathToFileURL(file).href, offline: true };
+}
+
+async function runCase(name, target, expectControlStuck) {
+  const { url, offline } = await materialize(target);
+  const control = await panTest({ url, offline });
+  const fixed = await panTest({ url, offline, inject: CONTENT_SCRIPTS });
+
+  const controlPanned = control.moved >= PANNED;
+  const fixedPanned = fixed.moved >= PANNED;
+  const problems = [];
+
+  if (expectControlStuck === true && controlPanned) {
+    problems.push(`the control panned ${control.moved}px — this fixture is not reproducing a freeze`);
+  }
+  if (expectControlStuck === false && !controlPanned) {
+    problems.push(`the control did not pan (${control.moved}px) — the harness itself is broken`);
+  }
+  if (!fixedPanned) {
+    problems.push(`WITH the content script the page still did not pan (${fixed.moved}px)`);
+  }
+
+  const verdict = problems.length ? 'FAIL' : 'ok  ';
+  console.log(`${verdict} ${name}`);
+  console.log(`       without: ${String(control.moved).padStart(4)}px  ${describe(control)}`);
+  console.log(`       with:    ${String(fixed.moved).padStart(4)}px  ${describe(fixed)}`);
+  for (const problem of problems) console.log(`       ↳ ${problem}`);
+  return problems.length === 0;
+}
+
+async function main() {
+  if (!findChrome()) {
+    console.log('SKIP: no Chrome/Chromium binary found. Set CHROME_PATH to run the scroll harness.');
+    process.exit(77);
+  }
+
+  const [target] = process.argv.slice(2);
+  let results = [];
+
+  if (target) {
+    // A page from a bug report, or a live one. We do not know whether it is
+    // stuck, so the control is reported but not asserted — reading it IS the
+    // diagnosis.
+    console.log(`Panning ${target}\n`);
+    results.push(await runCase(target, target, null));
+  } else {
+    const dir = join(HERE, 'fixtures');
+    for (const file of readdirSync(dir).filter((f) => f.endsWith('.html')).sort()) {
+      // plain.html is the control fixture: it must pan either way.
+      results.push(await runCase(file, join(dir, file), file !== 'plain.html'));
+    }
+  }
+
+  const failed = results.filter((ok) => !ok).length;
+  console.log(`\n${results.length - failed}/${results.length} passed`);
+  process.exit(failed ? 1 : 0);
+}
+
+main().catch((err) => { console.error(err); process.exit(1); });
