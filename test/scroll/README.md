@@ -47,6 +47,27 @@ halves are assertions.
 - `fixtures/plain.html` is the inverse control: nothing is wrong with it, so it
   must pan both ways. If it ever stops, the harness is broken, not the page.
 
+## Read the distance, not just the movement
+
+Every line prints how far the page panned **and how far it could have**:
+
+```
+with:  590px  of 590px available (1.7 screens)
+```
+
+That is a page fully released, and it is also what issue #28 was reported as:
+*"the page will not scroll"*. The whole document was 1.7 screens — the post,
+three replies and two reply placeholders that never filled in — so the reader
+flicked, the page moved two thirds of a screen and stopped. Nothing was locked.
+
+`short-page.html` pins that case so the harness says *"nothing is locked, there
+is just no page to move"* instead of reporting a lock that does not exist.
+
+Fixtures must declare `<meta name="viewport" content="width=device-width…">`.
+Without it Chrome lays the page out at 980px and scales it, and every distance
+printed is quietly wrong — a 4000px fixture reported 2227px of scroll instead of
+3204px.
+
 ## The fixtures
 
 One file per freeze mechanism this extension has actually met:
@@ -60,6 +81,7 @@ One file per freeze mechanism this extension has actually met:
 | `vaul-pinned.html` | `vaul`'s `position: fixed` with the offset in a negative `top` |
 | `base-ui-mobile.html` | Base UI, no-scrollbar path: inline overflow on both axes |
 | `base-ui-desktop.html` | Base UI, scrollbar path: `<body>` becomes a `100dvh` box |
+| `short-page.html` | nothing locked — there is just no page to scroll (issue #28) |
 
 Adding one is a single HTML file; `run.mjs` picks up everything in `fixtures/`.
 When a new lock shape turns up, add the fixture **first** and watch the control

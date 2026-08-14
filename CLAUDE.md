@@ -63,6 +63,13 @@ the independent `extension/block-x-nag.js`. Full background and references:
   browser, and a runner without one should not block one. On a green push to
   `main`, computes the next semver from Conventional Commits and triggers a
   release.
+- IMPORTANT: "will not scroll" has two causes and the reporter must separate
+  them. One is a lock or a `touch-action` cover. The other is that there is
+  barely any page: issue #28 was 1.7 screens of content — post, three replies,
+  two `role="status"` placeholders that never resolved — fully released by the
+  extension, 590px of travel, and it still read as frozen. `lock.maxScroll` /
+  `lock.screens` are what tell those apart; `scrollable` is a boolean satisfied
+  by 4px and cannot.
 - IMPORTANT: to test **scrolling**, drive touch. `window.scrollBy()`,
   `scrollIntoView()`, wheel events and `Input.synthesizeScrollGesture` all
   ignore `touch-action`, so they pass happily against a page no finger can move

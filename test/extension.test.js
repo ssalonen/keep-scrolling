@@ -1317,6 +1317,35 @@ test('the scroll harness drives real touch, never a programmatic scroll', () => 
   assert.ok(/mobile: true/.test(scrollHarness), 'the viewport must be emulated as mobile');
 });
 
+test('every scroll fixture emulates a phone viewport', () => {
+  // Without <meta name="viewport"> Chrome lays a page out at 980px and scales
+  // it, so a 4000px fixture reported 2227px of scroll at a 796px viewport
+  // instead of 3204px. Real mobile pages ship the meta; the fixtures have to
+  // as well or every distance the harness prints is quietly wrong.
+  const dir = join(root, 'test', 'scroll', 'fixtures');
+  for (const name of readdirSync(dir).filter((f) => f.endsWith('.html'))) {
+    const html = readFileSync(join(dir, name), 'utf8');
+    assert.ok(
+      /<meta name="viewport" content="width=device-width/.test(html),
+      `${name} must declare a device-width viewport`,
+    );
+  }
+});
+
+test('scroll distance is reported, not just a scrollable boolean', () => {
+  // Issue #28: 590px of scroll, every pixel of it released by the extension,
+  // and the page still read as frozen because that was the whole page. A
+  // boolean cannot tell that from a lock; a distance can.
+  for (const [what, src] of [['harness', scrollHarness], ['collector', scriptCollect]]) {
+    assert.ok(/maxScroll/.test(src), `${what} must report how far the page can travel`);
+    assert.ok(/screens/.test(src), `${what} must report how much page there is`);
+  }
+  assert.ok(/maxScroll: snapshot\.lock\.maxScroll/.test(scriptReport),
+    'the issue body must carry the scroll distance');
+  assert.ok(/of \$\{r\.maxScroll\}px available/.test(scrollRunner),
+    'the harness output must show the distance panned against the distance available');
+});
+
 test('the scroll harness asserts the control, not just the fix', () => {
   // A freeze fixture that pans WITHOUT the content script is not reproducing
   // anything, and a fix measured against it has been measured wrong.
@@ -1327,6 +1356,13 @@ test('the scroll harness asserts the control, not just the fix', () => {
   assert.ok(
     /the harness itself is broken/.test(scrollRunner),
     'the plain fixture must fail the run if it stops panning',
+  );
+  // "still locked" and "there was never any page to move" are different
+  // findings; calling the second one a lock sends the next reader hunting for
+  // something that was never there.
+  assert.ok(
+    /nothing is locked, there is just no page to move/.test(scrollRunner),
+    'a short page must not be reported as a lock',
   );
   assert.ok(
     /process\.exit\(77\)/.test(scrollRunner),
@@ -1346,6 +1382,7 @@ test('every documented freeze shape has a scroll fixture', () => {
     'vaul-pinned.html',        // vaul's position:fixed pin
     'base-ui-mobile.html',     // Base UI, no-scrollbar path
     'base-ui-desktop.html',    // Base UI, scrollbar path
+    'short-page.html',         // issue #28: nothing locked, nothing to scroll
   ]) {
     assert.ok(fixtures.includes(required), `missing scroll fixture: ${required}`);
   }

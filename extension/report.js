@@ -370,6 +370,12 @@ function describeSnapshot(snapshot, buildInfo) {
   // one block that must never be the thing that gets dropped.
   const lock = snapshot.lock && {
     scrollable: snapshot.lock.scrollable,
+    // How far it can travel, and how much page there is. `scrollable` is a
+    // boolean satisfied by 4px; "the page will not scroll" and "the page is
+    // 1.7 screens long and ends in placeholders" are different bugs that look
+    // identical without these two numbers.
+    maxScroll: snapshot.lock.maxScroll,
+    screens: snapshot.lock.screens,
     // Whether a finger can actually pan the page, which `scrollable` does not
     // answer — a full-screen touch-action:none cover leaves every other field
     // in this block reading "healthy". See collect-report.js.

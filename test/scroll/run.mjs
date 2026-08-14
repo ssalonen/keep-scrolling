@@ -41,13 +41,19 @@ const PANNED = 50;
 
 function describe(r) {
   const bits = [
-    `scrollable=${r.scrollable}`,
+    `of ${r.maxScroll}px available (${r.screens} screens)`,
     `html.overflow-y=${r.htmlOverflowY}`,
     `body.overflow-y=${r.bodyOverflowY}`,
   ];
   if (r.blocker) bits.push(`blocked by ${r.blocker.touchAction} on ${r.blocker.tag}`);
   return bits.join(', ');
 }
+
+// A page barely longer than the viewport cannot be panned far no matter what
+// the extension does, and "moved 40px" then looks like a failure. Issue #28 was
+// the reverse mistake made by a reader: 590px of scroll, every pixel of it
+// released, and it still felt frozen because that was the whole page.
+const NOT_MUCH_PAGE = 120;
 
 // A live or captured page keeps its stylesheets — without them the Tailwind
 // classes that carry `touch-action: none` are inert and the page pans happily,
@@ -74,23 +80,44 @@ async function materialize(target) {
   return { url: pathToFileURL(file).href, offline: true };
 }
 
-async function runCase(name, target, expectControlStuck) {
+// What a fixture is for. Naming the three outcomes beats a boolean, because the
+// third one is a real, correct result that used to be indistinguishable from a
+// failure — and mistaking it for one is how a reader ends up hunting a lock
+// that was never there (issue #28).
+const EXPECT = {
+  'plain.html': 'healthy',       // nothing wrong: must pan either way
+  'short-page.html': 'no-page',  // nothing locked, and almost nothing to scroll
+};
+const DEFAULT_EXPECT = 'frozen'; // stuck without the scripts, panning with them
+
+async function runCase(name, target, expect) {
   const { url, offline } = await materialize(target);
   const control = await panTest({ url, offline });
   const fixed = await panTest({ url, offline, inject: CONTENT_SCRIPTS });
 
   const controlPanned = control.moved >= PANNED;
   const fixedPanned = fixed.moved >= PANNED;
+  const shortPage = fixed.maxScroll < NOT_MUCH_PAGE;
   const problems = [];
 
-  if (expectControlStuck === true && controlPanned) {
+  if (expect === 'frozen' && controlPanned) {
     problems.push(`the control panned ${control.moved}px — this fixture is not reproducing a freeze`);
   }
-  if (expectControlStuck === false && !controlPanned) {
+  if (expect === 'healthy' && !controlPanned) {
     problems.push(`the control did not pan (${control.moved}px) — the harness itself is broken`);
   }
-  if (!fixedPanned) {
-    problems.push(`WITH the content script the page still did not pan (${fixed.moved}px)`);
+  if (expect === 'no-page') {
+    // The whole point of this case: prove the page is short rather than locked.
+    if (!shortPage) problems.push(`expected a page with nothing to scroll, got ${fixed.maxScroll}px`);
+    if (fixed.blocker) problems.push(`something is refusing the drag: ${fixed.blocker.tag}`);
+  } else if (!fixedPanned) {
+    // Distinguish "still locked" from "there was nothing to scroll". Only the
+    // first is a bug in this extension.
+    problems.push(shortPage
+      ? `the page is only ${fixed.screens} screens long (${fixed.maxScroll}px of scroll) — `
+        + 'nothing is locked, there is just no page to move'
+      : `WITH the content script the page still did not pan (${fixed.moved}px `
+        + `of ${fixed.maxScroll}px available)`);
   }
 
   const verdict = problems.length ? 'FAIL' : 'ok  ';
@@ -115,12 +142,11 @@ async function main() {
     // stuck, so the control is reported but not asserted — reading it IS the
     // diagnosis.
     console.log(`Panning ${target}\n`);
-    results.push(await runCase(target, target, null));
+    results.push(await runCase(target, target, 'report'));
   } else {
     const dir = join(HERE, 'fixtures');
     for (const file of readdirSync(dir).filter((f) => f.endsWith('.html')).sort()) {
-      // plain.html is the control fixture: it must pan either way.
-      results.push(await runCase(file, join(dir, file), file !== 'plain.html'));
+      results.push(await runCase(file, join(dir, file), EXPECT[file] || DEFAULT_EXPECT));
     }
   }
 

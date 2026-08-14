@@ -46,6 +46,14 @@ A green run means nothing on its own. Read **both** numbers:
 - **without: 0px / with: 0px** — still broken. The printed `blocked by …` line
   names the element; that is the selector to work from.
 
+And read the **distance available**, printed next to every number:
+
+- **with: 590px of 590px available (1.7 screens)** — the page is fully released
+  and *still* feels frozen to the reader, because that is the whole page. This
+  is issue #28: nothing to fix in the extension. Say so plainly rather than
+  hunting for a lock. `[role="status"]` counts in the bug report name the
+  unresolved placeholders the page ends on.
+
 ## Reproducing a report
 
 1. Prefer the **live URL** over the snapshot. `sanitizeHtml()` empties `<style>`

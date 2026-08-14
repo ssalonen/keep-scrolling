@@ -62,8 +62,14 @@ const PROBE = `(() => {
   }
   const html = getComputedStyle(document.documentElement);
   const body = getComputedStyle(document.body);
+  const height = document.scrollingElement.scrollHeight;
   return {
-    scrollable: document.scrollingElement.scrollHeight - innerHeight > 4,
+    scrollable: height - innerHeight > 4,
+    // How far the page COULD go. "panned 590px" is only good news next to it:
+    // issue #28 was a page with exactly 590px of scroll in it, fully released,
+    // that still read as frozen because that is all the page there was.
+    maxScroll: Math.max(0, Math.round(height - innerHeight)),
+    screens: Math.round((height / innerHeight) * 10) / 10,
     htmlOverflowY: html.overflowY, bodyOverflowY: body.overflowY,
     htmlPosition: html.position, bodyPosition: body.position,
     blocker,

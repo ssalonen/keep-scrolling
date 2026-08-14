@@ -67,6 +67,13 @@
     // What the X script marked as a nag and hid. Reported so "we never matched
     // it" and "we hid it and it is still on screen" stay distinguishable.
     '[data-xnr-hidden]',
+    // Content placeholders that never resolved. X ends a logged-out post page
+    // with `<div role="status" aria-label="Loading post">` skeletons, and a
+    // page that ends in those is short — which the reader experiences as "it
+    // will not scroll" even though nothing is locked (issue #28). The sample
+    // shows the aria-label, so this stays useful in any language. It may also
+    // catch a toast; over-matching costs nothing here, nothing is removed.
+    '[role="status"]',
     // Not removal signatures for either script — the libraries X has moved its
     // logged-out prompts onto, first `vaul` and now Base UI. Reported because a
     // page locked by a prompt we have no selector for is exactly the case this
@@ -227,12 +234,22 @@
   // The half of the problem a user can actually feel: is the page frozen?
   function describeScrollLock() {
     const scroller = document.scrollingElement;
+    const viewport = window.innerHeight;
+    const height = scroller ? scroller.scrollHeight : 0;
+    // How far the page can travel at all, not just whether it can move.
+    // `scrollable` is satisfied by 4px, and issue #28 was a page with 590px of
+    // scroll in it: the extension had already released everything there was to
+    // release, the reader flicked, the page moved two thirds of a screen and
+    // stopped against reply placeholders that never filled in. That is
+    // indistinguishable from a lock in a boolean, and obvious in a distance.
     return {
       elements: [
         describeElement('html', document.documentElement),
         describeElement('body', document.body),
       ],
-      scrollable: !!scroller && scroller.scrollHeight - window.innerHeight > 4,
+      scrollable: !!scroller && height - viewport > 4,
+      maxScroll: Math.max(0, Math.round(height - viewport)),
+      screens: viewport ? Math.round((height / viewport) * 10) / 10 : 0,
       pan: describeTouchTarget(),
     };
   }

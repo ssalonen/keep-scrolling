@@ -227,6 +227,14 @@ so a bug in the reporter can never break browsing.
 - `lock` — `<html>`/`<body>` classes, inline styles, computed
   `overflow`/`position`/`touch-action`/`pointer-events`, and whether the page
   can actually scroll. That is the half of the problem the user feels.
+- `lock.maxScroll` / `lock.screens` — how far the page can travel, and how much
+  page there is. `scrollable` is a boolean satisfied by 4px, and issue #28 was a
+  page with 590px of scroll in it: the extension had released everything there
+  was to release, and the reader still reported that it would not scroll,
+  because 1.7 screens is what the whole page amounted to — the post, three
+  replies, and two `role="status"` placeholders that never filled in. "It is
+  locked" and "there is nothing to scroll to" are different bugs, in different
+  code, and a boolean cannot tell them apart.
 - `lock.pan` — what is under the middle of the viewport, and the first element
   in its ancestor chain whose computed `touch-action` forbids a vertical drag.
   `scrollable` only compares document height to viewport height, and the two
