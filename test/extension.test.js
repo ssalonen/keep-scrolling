@@ -356,8 +356,14 @@ function loadCollectorFunction(name, globals) {
     collectComponents: scriptCollect.match(/function collectComponents\(\) \{[\s\S]*?\n  \}/),
   }[name];
   assert.ok(source, `${name}() not found in collect-report.js`);
+  // Shared helpers the extracted function calls; they close over the stubbed
+  // sanitizeHtml/truncate/TAG_LIMIT passed in as globals.
+  const helpers = scriptCollect.match(/function openingTag\(el\) \{[\s\S]*?\n  \}/);
+  assert.ok(helpers, 'openingTag() not found in collect-report.js');
   const names = Object.keys(globals);
-  return new Function(...names, `${source[0]}; return ${name};`)(...names.map((k) => globals[k]));
+  return new Function(...names, `${helpers[0]}; ${source[0]}; return ${name};`)(
+    ...names.map((k) => globals[k]),
+  );
 }
 
 test('the report popup is wired into the manifest and ships its files', () => {
@@ -435,6 +441,31 @@ test('the collector runs on the same hosts as the nag scripts and only reads the
 test('reporter scripts are syntactically valid', () => {
   assert.doesNotThrow(() => new Function(scriptCollect));
   assert.doesNotThrow(() => new Function(scriptReport));
+});
+
+test('the collector reports whether a finger can pan, not just whether the document is tall', () => {
+  // Issue #25: a full-screen touch-action:none cover froze the page while
+  // `scrollable` (document height vs viewport) said true, overflow was visible
+  // and neither html nor body carried a lock. Every field read "healthy".
+  const match = scriptCollect.match(/function forbidsVerticalPan\(touchAction\) \{[\s\S]*?\n  \}/);
+  assert.ok(match, 'forbidsVerticalPan() not found in source');
+  const forbidsVerticalPan = new Function(`${match[0]}; return forbidsVerticalPan;`)();
+
+  for (const value of ['none', 'pan-x', 'pan-left', 'pan-x pinch-zoom']) {
+    assert.equal(forbidsVerticalPan(value), true, `${value} forbids a vertical pan`);
+  }
+  for (const value of ['auto', 'manipulation', 'pan-y', 'pan-y pinch-zoom', 'pan-down', undefined]) {
+    assert.equal(forbidsVerticalPan(value), false, `${value} allows a vertical pan`);
+  }
+
+  assert.ok(
+    /pan: describeTouchTarget\(\)/.test(scriptCollect),
+    'describeScrollLock() must carry the pan probe',
+  );
+  assert.ok(
+    /pan: snapshot\.lock\.pan/.test(scriptReport),
+    'the issue body must carry the pan probe — it is the field that would have named issue #25',
+  );
 });
 
 test('the popup page keeps its JS in a separate file and loads nothing remote', () => {

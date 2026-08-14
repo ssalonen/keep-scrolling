@@ -116,7 +116,14 @@ for why).
 - IMPORTANT: the **blocking** variant is a full-screen
   `div[role="dialog"][aria-modal]` with `fixed inset-0 … touch-none` that
   swallows every touch — the banner logic never saw it, which is why the nag
-  survived through v0.5.x. Match it only by `data-interaction` (X's own
+  survived through v0.5.x. `.touch-none{touch-action:none}` is how it actually
+  freezes the page, and that is **not a scroll lock**: `overflow` stays
+  `visible` on `<html>` and `<body>`, the document stays taller than the
+  viewport, and every field a bug report collects reads healthy while no finger
+  can move the page (issue #25). Measured with real touch events against the
+  live page: 0 px of vertical drag without the extension, 590 px with it. When
+  testing scroll, drive touch — `window.scrollBy()` ignores `touch-action` and
+  will pass against a frozen page. Match it only by `data-interaction` (X's own
   semantic name for it, prefix-matched so `-backdrop`/`-panel`/a renamed root
   are covered), NEVER by `role="dialog"`, `aria-modal` or `touch-none` — X
   uses that same shape for the share menu and other legitimate dialogs.

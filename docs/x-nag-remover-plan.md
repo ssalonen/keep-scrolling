@@ -195,10 +195,39 @@ things up, all of them provable from what X actually serves:
    makes `<body>` scrollable resets the `body.scrollTop` the offset is parked
    in.
 
-There is one thing this does **not** explain and should not be claimed to: the
-reporter's snapshot was taken after the fact and contains no lock, so the exact
-runtime moment was never captured. The skeletons are the strongest evidence in
-it, and removal-before-hydration is the mechanism that fits them.
+### How the page freezes: `touch-action`, not `overflow`
+
+Everything above is about locks. The reported symptom was vertical scrolling,
+and on this build that has a second, simpler mechanism which no amount of
+`overflow` watching would ever see. The blocking modal is
+`class="group fixed inset-0 z-50 flex touch-none …"`, and X's stylesheet
+defines `.touch-none{touch-action:none}`. A full-viewport element with
+`touch-action: none` refuses a finger drag outright: the page is not locked,
+it is untouchable.
+
+Driven with real touch events (`Input.dispatchTouchEvent`, which honours
+`touch-action`; `window.scrollBy()` does not and proves nothing here) against
+the live server-rendered status page with X's own stylesheet loaded:
+
+| | vertical touch drag |
+|---|---|
+| without the extension | **0 px** — `scrollable: true`, `overflow: visible` on html *and* body, no lock anywhere |
+| with the extension | **590 px** |
+
+That first row is the bug report's page state, field for field. It is why every
+number in issue #25 read "healthy" while the reader could not move the page,
+and why the reporter now also carries a `pan` probe — see `bug-reporting.md`.
+
+Two things this does **not** establish, and neither should be claimed:
+
+- that this particular modal was on screen at the moment the reporter tried to
+  scroll. Their snapshot was taken afterwards and contains no
+  `app-store-obstruction` at all — v0.8.1 already removed it — and no lock. So
+  either it had been dealt with by then, or a same-shaped cover we do not match
+  was there. The `pan` probe is what decides that in the next report.
+- that removal-before-hydration is what strands the reply list. The skeletons
+  are the strongest evidence in the snapshot and that mechanism fits them, but
+  the runtime moment was never captured.
 
 ## How it works
 - Matches the nag via `a[href*="launch_app_store=true"]` filtered by
@@ -330,6 +359,15 @@ have lost `launch_app_store=true` and kept their `ct=`, and the cookie-consent
 banner plus any in-flow `<aside>` are untouched. Drive the four lock shapes
 (bare `overflow:hidden`, `vaul`'s `position:fixed`, Base UI's two) from small
 synthetic fixtures and assert the page scrolls after each.
+
+IMPORTANT: to test *scrolling*, drive a real touch drag —
+`Input.dispatchTouchEvent` over CDP (touchStart, a run of touchMoves, touchEnd)
+with X's own stylesheet served locally. `window.scrollBy()` and
+`Input.synthesizeScrollGesture` do not exercise `touch-action` here, so a run
+built on them passes happily against a page no finger can move — which is the
+exact failure in issue #25. The control is worth keeping alongside: the same
+page *without* the content script must fail to pan, or the fixture is not
+reproducing anything.
 
 That run is what caught `injectStyle()` throwing on a null
 `document.documentElement` at `document_start` — an exception there aborts the

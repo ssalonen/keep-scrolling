@@ -135,8 +135,14 @@
 
       // 3. The blocking modal's lock also disables interaction with everything
       //    behind it via an inline pointer-events:none — clear only that exact
-      //    inline value, never a stylesheet-driven one.
+      //    inline value, never a stylesheet-driven one. An inline
+      //    touch-action:none is the same idea aimed straight at panning: it
+      //    freezes the page with nothing to see in `overflow` at all, which is
+      //    the shape issue #25 turned out to have (there, on the modal rather
+      //    than on <body> — but if X ever moves it here, overflow-watching
+      //    would miss it completely).
       if (s.pointerEvents === 'none') s.pointerEvents = '';
+      if (s.touchAction === 'none') s.touchAction = '';
       s.removeProperty('padding-right');
     }
   }
