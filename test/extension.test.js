@@ -96,21 +96,69 @@ test('X content script is syntactically valid', () => {
   assert.doesNotThrow(() => new Function(scriptX));
 });
 
-test('X script matches the app-upsell banner by its purpose-built href/download marker', () => {
-  for (const sig of ['download', 'launch_app_store=true', "closest('aside')"]) {
+test('X script matches the app-upsell nag by its purpose-built href marker', () => {
+  for (const sig of ['launch_app_store=true', "closest('aside')"]) {
     assert.ok(scriptX.includes(sig), `missing marker: ${sig}`);
+  }
+  // X dropped the `download` attribute from every app-store link; a selector
+  // that still required it matched nothing at all on the shipped page.
+  assert.ok(
+    !/a\[download\]/.test(scriptX),
+    'must not require the `download` attribute — X no longer emits it, so the selector ' +
+      'silently stopped matching the banner and the top-bar "Open app" pill',
+  );
+});
+
+test('X script tells nag links from engagement controls by X\'s own ct= surface name', () => {
+  const match = scriptX.match(/function isNagLink\(url\) \{[\s\S]*?\n  \}/);
+  assert.ok(match, 'isNagLink() not found in source');
+  const isNagLink = new Function(`${match[0]}; return isNagLink;`)();
+
+  // Standalone "get the app" affordances — hide these.
+  assert.ok(isNagLink('https://m.x.com/u/status/1?launch_app_store=true&ct=post-modal'));
+  assert.ok(isNagLink('https://m.x.com/u/status/1?launch_app_store=true&ct=post-timeline'));
+  assert.ok(isNagLink('https://m.x.com/u/status/1?launch_app_store=true'), 'top-bar pill has no ct');
+
+  // Controls the reader deliberately tapped — never hide these; they are
+  // defused by stripping the param instead.
+  for (const ct of ['engagement_reply', 'engagement_retweet', 'engagement_like',
+    'engagement_bookmark', 'engagement_view_post', 'engagement_generic']) {
+    assert.ok(
+      !isNagLink(`https://m.x.com/i/status/1?launch_app_store=true&ct=${ct}`),
+      `must never hide the ${ct} control`,
+    );
   }
 });
 
-test('X script only removes the whole <aside> when it is actually the fixed floating banner', () => {
+test('X script hides nags instead of removing them (X server-renders them; React hydrates)', () => {
+  // Removing a server-rendered node at document_start is a structural
+  // hydration mismatch: the reply list came back as permanent "Loading post"
+  // skeletons, which reads to a user as "the page will not scroll".
+  assert.ok(scriptX.includes('data-xnr-hidden'), 'must mark hidden nags with data-xnr-hidden');
+  assert.ok(
+    scriptX.includes("HIDDEN_SELECTOR = '[data-xnr-hidden]'"),
+    'HIDDEN_SELECTOR must be the mark hideNags() sets',
+  );
+  assert.ok(
+    /style\.textContent =[\s\S]*?\$\{HIDDEN_SELECTOR\}\s*\{\s*display: none !important; \}/.test(scriptX),
+    'the injected CSS must hide whatever was marked',
+  );
+  const codeX = scriptX.replace(/^\s*\/\/.*$/gm, '');
+  assert.ok(
+    !/\.remove\(\)/.test(codeX),
+    'must not remove nodes from X\'s DOM — hide them, so React\'s tree stays intact',
+  );
+});
+
+test('X script only hides the whole <aside> when it is actually the fixed floating banner', () => {
   assert.ok(
     scriptX.includes('getComputedStyle(aside).position === \'fixed\''),
-    'must gate whole-<aside> removal on position:fixed — an in-flow <aside> could be unrelated ' +
+    'must gate whole-<aside> hiding on position:fixed — an in-flow <aside> could be unrelated ' +
       'content (e.g. a reply-list region) whose removal would break the page beyond the banner',
   );
 });
 
-test('X script removes the blocking "See this post in the app" modal by its data-interaction marker', () => {
+test('X script hides the blocking "See this post in the app" modal by its data-interaction marker', () => {
   assert.ok(
     scriptX.includes('[data-interaction^="app-store-obstruction"]'),
     'must match X\'s own semantic marker for the blocking app-install modal',
@@ -172,13 +220,20 @@ test('X script defuses launch_app_store=true on both href and data-href (engagem
   }
   assert.ok(
     /run\(\)\s*\{[\s\S]*?defuseAppStoreLinks\(\);/.test(scriptX),
-    'defuseAppStoreLinks() must run on every pass alongside killNags()',
+    'defuseAppStoreLinks() must run on every pass alongside hideNags()',
+  );
+  // Ordering matters now that nags are hidden rather than removed: the param
+  // defuseAppStoreLinks() strips is the marker hideNags() matches on, so a
+  // freshly rendered nag has to be seen before it is defused.
+  assert.ok(
+    /run\(\)\s*\{[\s\S]*?hideNags\(\);[\s\S]*?defuseAppStoreLinks\(\);/.test(scriptX),
+    'hideNags() must run before defuseAppStoreLinks() — it strips the marker hideNags() needs',
   );
 });
 
 test('X script releases scroll on every pass, not only when a nag was matched', () => {
   assert.ok(/function\s+releaseScroll/.test(scriptX), 'releaseScroll() must exist');
-  assert.ok(/function\s+killNags/.test(scriptX), 'killNags() must exist');
+  assert.ok(/function\s+hideNags/.test(scriptX), 'hideNags() must exist');
   // The release used to be gated on `hit`. X locks the page from prompts that
   // carry none of our markers, so the gate never opened and the page stayed
   // frozen with nothing on screen to explain it.
@@ -189,7 +244,45 @@ test('X script releases scroll on every pass, not only when a nag was matched', 
   );
   assert.ok(
     /releaseScroll\(\);\s*\n\s*return hit;/.test(scriptX),
-    'killNags() must re-assert scroll unconditionally, matching the Reddit script',
+    'hideNags() must re-assert scroll unconditionally, matching the Reddit script',
+  );
+});
+
+test('X script undoes Base UI\'s scroll lock, not just the overflow half of it', () => {
+  // X moved its logged-out prompts from `vaul` onto Base UI. Its lock has two
+  // shapes: inline overflow-x/overflow-y:hidden (mobile Safari, where there is
+  // no scrollbar to compensate for), and — marked with its own
+  // data-base-ui-scroll-locked on <html> — moving the scroll onto <body> as a
+  // position:relative, 100dvh/100vw, border-box box with the offset parked in
+  // body.scrollTop. Clearing overflow alone leaves that body clamped to one
+  // viewport: released, and still unscrollable.
+  const match = scriptX.match(/function releaseBaseUiLock\(\) \{[\s\S]*?\n  \}/);
+  assert.ok(match, 'releaseBaseUiLock() not found in source');
+  const fn = match[0];
+  assert.ok(
+    scriptX.includes('data-base-ui-scroll-locked'),
+    "must key on Base UI's own lock marker, not on the shape of the styles",
+  );
+  for (const prop of ['position', 'height', 'width', 'box-sizing']) {
+    assert.ok(fn.includes(`'${prop}'`), `must clear the whole locked-body set (missing ${prop})`);
+  }
+  assert.ok(
+    /window\.scrollTo\(0,\s*offset\)/.test(fn),
+    'must restore the offset Base UI parked in body.scrollTop',
+  );
+  assert.ok(
+    /const offset = body \? body\.scrollTop : 0;[\s\S]*?removeProperty/.test(fn),
+    'must read body.scrollTop back BEFORE clearing the styles that make body scrollable',
+  );
+  assert.ok(
+    /releaseScroll\(\) \{\s*(?:\/\/[^\n]*\n\s*)*releaseBaseUiLock\(\);/.test(scriptX),
+    'releaseBaseUiLock() must run first, for the same reason',
+  );
+
+  const releaseScroll = scriptX.match(/function releaseScroll\(\) \{[\s\S]*?\n  \}/)[0];
+  assert.ok(
+    releaseScroll.includes("s.overflowX === 'hidden'"),
+    "must clear Base UI's mobile lock on both axes",
   );
 });
 
@@ -263,8 +356,14 @@ function loadCollectorFunction(name, globals) {
     collectComponents: scriptCollect.match(/function collectComponents\(\) \{[\s\S]*?\n  \}/),
   }[name];
   assert.ok(source, `${name}() not found in collect-report.js`);
+  // Shared helpers the extracted function calls; they close over the stubbed
+  // sanitizeHtml/truncate/TAG_LIMIT passed in as globals.
+  const helpers = scriptCollect.match(/function openingTag\(el\) \{[\s\S]*?\n  \}/);
+  assert.ok(helpers, 'openingTag() not found in collect-report.js');
   const names = Object.keys(globals);
-  return new Function(...names, `${source[0]}; return ${name};`)(...names.map((k) => globals[k]));
+  return new Function(...names, `${helpers[0]}; ${source[0]}; return ${name};`)(
+    ...names.map((k) => globals[k]),
+  );
 }
 
 test('the report popup is wired into the manifest and ships its files', () => {
@@ -342,6 +441,31 @@ test('the collector runs on the same hosts as the nag scripts and only reads the
 test('reporter scripts are syntactically valid', () => {
   assert.doesNotThrow(() => new Function(scriptCollect));
   assert.doesNotThrow(() => new Function(scriptReport));
+});
+
+test('the collector reports whether a finger can pan, not just whether the document is tall', () => {
+  // Issue #25: a full-screen touch-action:none cover froze the page while
+  // `scrollable` (document height vs viewport) said true, overflow was visible
+  // and neither html nor body carried a lock. Every field read "healthy".
+  const match = scriptCollect.match(/function forbidsVerticalPan\(touchAction\) \{[\s\S]*?\n  \}/);
+  assert.ok(match, 'forbidsVerticalPan() not found in source');
+  const forbidsVerticalPan = new Function(`${match[0]}; return forbidsVerticalPan;`)();
+
+  for (const value of ['none', 'pan-x', 'pan-left', 'pan-x pinch-zoom']) {
+    assert.equal(forbidsVerticalPan(value), true, `${value} forbids a vertical pan`);
+  }
+  for (const value of ['auto', 'manipulation', 'pan-y', 'pan-y pinch-zoom', 'pan-down', undefined]) {
+    assert.equal(forbidsVerticalPan(value), false, `${value} allows a vertical pan`);
+  }
+
+  assert.ok(
+    /pan: describeTouchTarget\(\)/.test(scriptCollect),
+    'describeScrollLock() must carry the pan probe',
+  );
+  assert.ok(
+    /pan: snapshot\.lock\.pan/.test(scriptReport),
+    'the issue body must carry the pan probe — it is the field that would have named issue #25',
+  );
 });
 
 test('the popup page keeps its JS in a separate file and loads nothing remote', () => {

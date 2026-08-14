@@ -370,6 +370,10 @@ function describeSnapshot(snapshot, buildInfo) {
   // one block that must never be the thing that gets dropped.
   const lock = snapshot.lock && {
     scrollable: snapshot.lock.scrollable,
+    // Whether a finger can actually pan the page, which `scrollable` does not
+    // answer — a full-screen touch-action:none cover leaves every other field
+    // in this block reading "healthy". See collect-report.js.
+    pan: snapshot.lock.pan,
     ...Object.fromEntries((snapshot.lock.elements || []).map((el) => [
       el.element,
       el.present ? { class: el.class, style: el.style, ...el.computed } : 'absent',

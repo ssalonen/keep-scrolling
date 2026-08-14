@@ -64,11 +64,19 @@
     'a[download][href*="launch_app_store=true"]',
     '[href*="launch_app_store=true"]',
     '[data-href*="launch_app_store=true"]',
-    // Not a removal signature for either script — the drawer library X moved
-    // its logged-out prompts onto. Reported because a page locked by a drawer
-    // we have no selector for is exactly the case this reporter exists for.
+    // What the X script marked as a nag and hid. Reported so "we never matched
+    // it" and "we hid it and it is still on screen" stay distinguishable.
+    '[data-xnr-hidden]',
+    // Not removal signatures for either script — the libraries X has moved its
+    // logged-out prompts onto, first `vaul` and now Base UI. Reported because a
+    // page locked by a prompt we have no selector for is exactly the case this
+    // reporter exists for; data-base-ui-scroll-locked in particular names the
+    // lock itself, which no amount of html/body inline style would reveal once
+    // the nag script has already cleared it.
     '[data-vaul-drawer]',
     '[data-vaul-overlay]',
+    '[data-base-ui-scroll-locked]',
+    '[data-base-ui-inert]',
   ];
 
   // The marker stylesheets the two nag scripts inject. Their presence is proof
@@ -165,6 +173,57 @@
     };
   }
 
+  // `touch-action` is not inherited, but the effective value for a touch is the
+  // intersection over the hit element and its ancestors — so a cover anywhere
+  // in that chain can forbid vertical panning. Anything but `auto` and
+  // `manipulation` has to name a vertical pan explicitly to still allow one.
+  function forbidsVerticalPan(touchAction) {
+    const value = String(touchAction || 'auto');
+    if (value === 'auto' || value === 'manipulation') return false;
+    return !/\b(?:pan-y|pan-up|pan-down)\b/.test(value);
+  }
+
+  function openingTag(el) {
+    const html = el.outerHTML || '';
+    const close = html.indexOf('>');
+    return truncate(sanitizeHtml(close === -1 ? html : html.slice(0, close + 1)), TAG_LIMIT);
+  }
+
+  // What is actually under the reader's finger, and can it pan?
+  //
+  // `scrollable` below only says the document is taller than the viewport. It
+  // says nothing about whether a drag moves it, and those come apart: issue #25
+  // was a full-screen `touch-action: none` cover (X's app-store modal, `fixed
+  // inset-0 touch-none`) over a page that reported scrollable:true,
+  // overflow:visible and no lock on html or body. Every field in this report
+  // said "healthy" while the page could not be panned at all — the one thing
+  // the user was trying to tell us. So hit-test the middle of the viewport and
+  // walk up, naming the first element in the chain that refuses a vertical pan.
+  function describeTouchTarget() {
+    let el;
+    try { el = document.elementFromPoint(window.innerWidth / 2, window.innerHeight / 2); }
+    catch { return undefined; }
+    if (!el) return undefined;
+
+    let target;
+    for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+      let style;
+      try { style = getComputedStyle(node); } catch { break; }
+      if (!target) target = openingTag(node);
+      if (forbidsVerticalPan(style.touchAction)) {
+        return {
+          target,
+          blocked: true,
+          by: openingTag(node),
+          touchAction: style.touchAction,
+          position: style.position,
+          pointerEvents: style.pointerEvents,
+        };
+      }
+    }
+    return { target, blocked: false };
+  }
+
   // The half of the problem a user can actually feel: is the page frozen?
   function describeScrollLock() {
     const scroller = document.scrollingElement;
@@ -174,6 +233,7 @@
         describeElement('body', document.body),
       ],
       scrollable: !!scroller && scroller.scrollHeight - window.innerHeight > 4,
+      pan: describeTouchTarget(),
     };
   }
 
@@ -221,15 +281,13 @@
       // The opening tag alone: id, classes and any data-* the site named the
       // component after (`data-interaction`, `data-vaul-drawer`) — the parts a
       // new selector would be built from, without the subtree's bulk.
-      const html = el.outerHTML || '';
-      const close = html.indexOf('>');
       found.push({
         coverage: Math.round(coverage * 100) / 100,
         position: style.position,
         zIndex: style.zIndex,
         pointerEvents: style.pointerEvents,
         touchAction: style.touchAction,
-        tag: truncate(sanitizeHtml(close === -1 ? html : html.slice(0, close + 1)), TAG_LIMIT),
+        tag: openingTag(el),
         text: truncate((el.textContent || '').replace(/\s+/g, ' ').trim(), 200),
       });
     }
