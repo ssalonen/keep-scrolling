@@ -449,6 +449,32 @@ test('reporter scripts are syntactically valid', () => {
   assert.doesNotThrow(() => new Function(scriptReport));
 });
 
+test('the X script releases the lock when a finger lands, not only on mutations', () => {
+  // Paired captures of one post showed X escalating when the banner is hidden:
+  // without the extension it renders the <aside> banner and the page scrolls;
+  // with it there is no banner and a touch-none app-store-obstruction modal
+  // instead. So the lock we race is the aggressive one, and a mutation-driven
+  // pass can be a frame late. Releasing on touchstart closes the window from
+  // the other end.
+  assert.ok(/addEventListener\('touchstart'|'touchstart',/.test(scriptX)
+    || /\['touchstart', 'pointerdown'\]/.test(scriptX), 'must release on touchstart');
+  assert.ok(
+    /passive: true/.test(scriptX),
+    'the listener must be passive — it must never be able to delay or cancel a scroll',
+  );
+});
+
+test('the collector can tell a flickering lock from no lock at all', () => {
+  // A lock applied and released repeatedly reads identically to a healthy page
+  // in a single sample, which is how three reports in a row arrived with every
+  // field saying the page was fine.
+  assert.ok(/function watchLock/.test(scriptCollect), 'watchLock() must exist');
+  assert.ok(/LOCK_SAMPLES/.test(scriptCollect) && /LOCK_GAP_MS/.test(scriptCollect),
+    'sampling must be over a window, not one reading');
+  assert.ok(/lockStates: snapshot\.lock\.states/.test(scriptReport),
+    'the issue body must carry how many distinct lock states were seen');
+});
+
 test('the collector reports whether a finger can pan, not just whether the document is tall', () => {
   // Issue #25: a full-screen touch-action:none cover froze the page while
   // `scrollable` (document height vs viewport) said true, overflow was visible

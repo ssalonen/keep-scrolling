@@ -186,6 +186,14 @@ for why).
   `run()`. The param the latter strips is the marker the former matches on.
   The hide itself survives (it is recorded on the node, not re-derived each
   pass), but the order is what lets a freshly rendered nag be recognised.
+- IMPORTANT: hiding the banner makes X **escalate**. A matched pair of captures
+  (one post, one build, extension off then on) shows the `<aside>` banner and no
+  modal without us, and no banner plus a `touch-none`
+  `app-store-obstruction` modal with us. `use-may-obstruct` answers a suppressed
+  banner with the blocking variant, so the lock the script races is the
+  aggressive one. Hence `releaseScroll()` also runs on `touchstart`/`pointerdown`
+  (passive, capture): every other trigger is reactive to a mutation and can be a
+  frame late.
 - IMPORTANT: `releaseScroll()` runs on **every** pass, like Reddit's — it is
   no longer gated on "a nag was found this pass". That gate was the v0.6.x
   freeze: X locks the page from prompts carrying none of our markers, so the

@@ -286,4 +286,22 @@
   for (const ev of ['DOMContentLoaded', 'load']) {
     window.addEventListener(ev, schedule, { once: true });
   }
+
+  // And at the one moment that actually matters: a finger landing on the page.
+  //
+  // Everything above is reactive to mutations, which leaves a window — X mounts
+  // a prompt, its library locks the page, and the lock stands until our next
+  // observer pass. Worse, hiding the banner makes X escalate to the *blocking*
+  // modal (paired captures of one post, with and without the extension, differ
+  // exactly there: `<aside>` banner and no modal without us, no banner and a
+  // touch-none `app-store-obstruction` modal with us), so the lock we race is
+  // the aggressive one.
+  //
+  // Releasing on touchstart closes that window from the other end: whatever
+  // happened since the last pass, the page is unlocked before the drag is
+  // interpreted. Passive, so this can never delay or cancel a scroll, and
+  // releaseScroll() is idempotent and touches only inline values.
+  for (const ev of ['touchstart', 'pointerdown']) {
+    window.addEventListener(ev, releaseScroll, { passive: true, capture: true });
+  }
 })();

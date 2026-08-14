@@ -376,6 +376,11 @@ function describeSnapshot(snapshot, buildInfo) {
     // identical without these two numbers.
     maxScroll: snapshot.lock.maxScroll,
     screens: snapshot.lock.screens,
+    // >1 means the lock state changed while we watched: something is locking
+    // and unlocking, which no single reading can show and which looks exactly
+    // like "nothing is wrong" in a snapshot.
+    lockStates: snapshot.lock.states,
+    lockChanged: snapshot.lock.changed,
     // Whether a finger can actually pan the page, which `scrollable` does not
     // answer — a full-screen touch-action:none cover leaves every other field
     // in this block reading "healthy". See collect-report.js.

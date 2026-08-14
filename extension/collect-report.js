@@ -90,6 +90,10 @@
   // the content script ran on this page at all — the single most useful bit in
   // a "it didn't work" report, and the one thing a user cannot check.
   const SCRIPT_MARKERS = { reddit: 'rnr-style', x: 'xnr-style' };
+  // Base UI marks <html> with this while its scroll lock is in force.
+  const BASE_UI_LOCK_ATTR = 'data-base-ui-scroll-locked';
+  const LOCK_SAMPLES = 12;
+  const LOCK_GAP_MS = 40;
 
   function truncate(text, limit) {
     if (typeof text !== 'string' || text.length <= limit) return text || '';
@@ -231,6 +235,49 @@
     return { target, blocked: false };
   }
 
+  // A lock that comes and goes leaves no trace in a single reading.
+  //
+  // Paired captures of one post — with and without the extension — showed X
+  // escalating: without us it renders the `<aside>` banner and the page
+  // scrolls; with us it renders the touch-none `app-store-obstruction` modal
+  // instead. Our stylesheet hides that modal and releaseScroll() clears the
+  // lock its library applies, and every snapshot taken afterwards reads clean.
+  // If the page is nevertheless frozen for the reader, the interesting thing is
+  // not the state at one instant but whether it is *changing* — a lock applied
+  // and released repeatedly looks identical to no lock at all in one sample.
+  function watchLock(samples, gapMs) {
+    const read = () => {
+      const html = document.documentElement;
+      const body = document.body;
+      let cover = '';
+      try {
+        const el = document.elementFromPoint(window.innerWidth / 2, window.innerHeight / 2);
+        for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+          const st = getComputedStyle(n);
+          if (forbidsVerticalPan(st.touchAction)) { cover = st.touchAction; break; }
+        }
+      } catch { /* ignore */ }
+      return [
+        html ? html.getAttribute('style') || '' : '',
+        body ? body.getAttribute('style') || '' : '',
+        html && html.hasAttribute(BASE_UI_LOCK_ATTR) ? 'base-ui-locked' : '',
+        cover,
+      ].join('|');
+    };
+    return new Promise((resolve) => {
+      const seen = [];
+      let n = 0;
+      const tick = () => {
+        const state = read();
+        if (seen[seen.length - 1] !== state) seen.push(state);
+        n += 1;
+        if (n >= samples) resolve(seen);
+        else setTimeout(tick, gapMs);
+      };
+      tick();
+    });
+  }
+
   // The half of the problem a user can actually feel: is the page frozen?
   function describeScrollLock() {
     const scroller = document.scrollingElement;
@@ -363,13 +410,24 @@
 
   api.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!message || message.type !== COLLECT_MESSAGE) return undefined;
-    try {
-      sendResponse(collect());
-    } catch (error) {
-      sendResponse({ error: String((error && error.message) || error) });
-    }
-    // Answered synchronously above; `true` keeps the channel valid across the
-    // callback- and promise-flavoured runtime implementations alike.
+    // The lock watch is the one part that cannot be read instantly: half a
+    // second of sampling is what separates "nothing is locked" from "something
+    // locks and unlocks faster than a snapshot can see".
+    watchLock(LOCK_SAMPLES, LOCK_GAP_MS).then((states) => {
+      try {
+        const snapshot = collect();
+        if (snapshot.lock) {
+          snapshot.lock.states = states.length;
+          // Only worth the space when it actually changed; one steady state is
+          // the normal case and says nothing a single reading did not.
+          if (states.length > 1) snapshot.lock.changed = states.map((s) => truncate(s, ATTR_LIMIT));
+        }
+        sendResponse(snapshot);
+      } catch (error) {
+        sendResponse({ error: String((error && error.message) || error) });
+      }
+    }, (error) => sendResponse({ error: String((error && error.message) || error) }));
+    // Answered asynchronously; `true` keeps the channel open for the reply.
     return true;
   });
 })();

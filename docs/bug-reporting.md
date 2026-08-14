@@ -235,6 +235,11 @@ so a bug in the reporter can never break browsing.
   replies, and two `role="status"` placeholders that never filled in. "It is
   locked" and "there is nothing to scroll to" are different bugs, in different
   code, and a boolean cannot tell them apart.
+- `lock.states` / `lock.changed` — the lock sampled over ~half a second rather
+  than read once. A lock applied and released repeatedly reads exactly like a
+  healthy page in a single sample, and three reports in a row arrived that way:
+  every field fine, the page frozen. More than one state means something is
+  fighting for the scroll.
 - `lock.pan` — what is under the middle of the viewport, and the first element
   in its ancestor chain whose computed `touch-action` forbids a vertical drag.
   `scrollable` only compares document height to viewport height, and the two
