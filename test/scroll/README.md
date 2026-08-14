@@ -117,10 +117,31 @@ everything that matters here — `touch-action` handling, `-webkit-overflow-
 scrolling`, rubber-banding at the document edge. A green run is evidence, not
 proof, that a fix works on a phone.
 
-Where a closer engine is available, use it: `npx playwright install webkit` and
-drive the same fixtures through it, or open the page on the device itself with
-Safari Web Inspector from a Mac. Until then, an on-device check stays the last
-word on any scrolling fix.
+`--webkit` closes part of that gap. Playwright's WebKit offers taps and no
+swipe, so it cannot answer "does a finger move this page" — but it can answer
+**what the reader can reach**, and that half is exactly where the engines
+disagree (`100dvh` under a collapsing toolbar, `-webkit-overflow-scrolling`,
+overflow propagation from `<body>`). It scrolls to the bottom and reports the
+scroll the document refused to give up, plus any element still laid out below
+the fold — the *"there is text at the bottom I cannot scroll into"* shape, which
+no lock check and no pan test detects, because nothing is locked and the drag
+works fine.
+
+```
+npm i playwright-core
+npx playwright install webkit
+npx playwright install-deps webkit   # the step people get stuck on
+node test/scroll/run.mjs <url> --with-js --webkit
+```
+
+That third command is the one that matters: the WebKit **download succeeds** and
+then fails *validation* on missing system libraries (`libwoff2`,
+`libgstreamer`, `libenchant`, `libmanette`, …), which reads like a network
+failure and is not one. It needs root/apt. Without any of this, `--webkit`
+prints a skip and the rest of the run is unaffected — `playwright-core` is
+imported dynamically and `node_modules/` is git-ignored.
+
+An on-device check still has the last word on any scrolling fix.
 
 ## Reading a report with it
 

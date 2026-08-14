@@ -7,6 +7,8 @@
 //   node test/scroll/run.mjs https://x.com/…/status/…   a live page
 //   node test/scroll/run.mjs https://x.com/…  --with-js  mirror it and run the
 //                                                        site's real bundle
+//   node test/scroll/run.mjs … --webkit                  also measure reachable
+//                                                        scroll in WebKit
 //
 // Plain URL mode blocks every request, so the site's own client code never
 // runs — enough for a server-rendered cover, not enough for a lock a site
@@ -32,6 +34,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { findChrome } from './cdp.mjs';
 import { panTest } from './harness.mjs';
 import { mirror, serve } from './mirror.mjs';
+import { webkitAvailable, reachTest } from './webkit.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..', '..');
@@ -107,12 +110,12 @@ const EXPECT = {
 };
 const DEFAULT_EXPECT = 'frozen'; // stuck without the scripts, panning with them
 
-async function runCase(name, target, expect, withJs = false) {
+async function runCase(name, target, expect, withJs = false, webkit = false) {
+  let webkitLine = '';
   const { url, offline, allowOrigin, settle, server } = await materialize(target, withJs);
   const opts = { url, offline, allowOrigin, settle };
   const control = await panTest(opts);
   const fixed = await panTest({ ...opts, inject: CONTENT_SCRIPTS });
-  if (server) server.close();
 
   const controlPanned = control.moved >= PANNED;
   const fixedPanned = fixed.moved >= PANNED;
@@ -139,10 +142,34 @@ async function runCase(name, target, expect, withJs = false) {
         + `of ${fixed.maxScroll}px available)`);
   }
 
+  // The engine iPhones run, where it is installed. It cannot swipe, but it can
+  // say whether the last screenful is reachable — and Safari and Chromium
+  // disagree about exactly the things that decide that.
+  if (webkit) {
+    const opts2 = { url, allowOrigin, settle, inject: CONTENT_SCRIPTS };
+    const r = await reachTest(opts2).catch((e) => ({ error: e.message.split('\n')[0] }));
+    if (r.error) problems.push(`WebKit run failed: ${r.error}`);
+    else {
+      webkitLine = `       webkit:  reached ${r.reached}px of ${r.maxScroll}px`
+        + (r.shortfall ? `, ${r.shortfall}px it will not give up` : '')
+        + (r.strandedCount ? `, ${r.strandedCount} element(s) stranded below the fold` : '');
+      if (r.stranded?.length) {
+        webkitLine += `\n       stranded: ${r.stranded.map((x) => `+${x.below}px "${x.text}"`).join(' | ')}`;
+      }
+      if (r.shortfall > 4 || r.strandedCount) {
+        problems.push('WebKit lays out content the reader cannot reach — '
+          + 'this is the "text at the bottom I cannot scroll into" shape');
+      }
+    }
+  }
+
+  if (server) server.close();   // after every engine has had the page, not before
+
   const verdict = problems.length ? 'FAIL' : 'ok  ';
   console.log(`${verdict} ${name}`);
   console.log(`       without: ${String(control.moved).padStart(4)}px  ${describe(control)}`);
   console.log(`       with:    ${String(fixed.moved).padStart(4)}px  ${describe(fixed)}`);
+  if (webkitLine) console.log(webkitLine);
   for (const problem of problems) console.log(`       ↳ ${problem}`);
   return problems.length === 0;
 }
@@ -155,6 +182,13 @@ async function main() {
 
   const args = process.argv.slice(2);
   const withJs = args.includes('--with-js');
+  const wantWebkit = args.includes('--webkit');
+  const webkit = wantWebkit && await webkitAvailable();
+  if (wantWebkit && !webkit) {
+    console.log('SKIP --webkit: install it with `npm i playwright-core && npx playwright install webkit`');
+    console.log('  (and `npx playwright install-deps webkit` — the download succeeds, then fails');
+    console.log('   validation on missing system libraries, which is the step people get stuck on)\n');
+  }
   const [target] = args.filter((a) => !a.startsWith('--'));
   let results = [];
 
@@ -163,11 +197,11 @@ async function main() {
     // stuck, so the control is reported but not asserted — reading it IS the
     // diagnosis.
     console.log(`Panning ${target}${withJs ? ' (mirrored, running its real JavaScript)' : ''}\n`);
-    results.push(await runCase(target, target, 'report', withJs));
+    results.push(await runCase(target, target, 'report', withJs, webkit));
   } else {
     const dir = join(HERE, 'fixtures');
     for (const file of readdirSync(dir).filter((f) => f.endsWith('.html')).sort()) {
-      results.push(await runCase(file, join(dir, file), EXPECT[file] || DEFAULT_EXPECT));
+      results.push(await runCase(file, join(dir, file), EXPECT[file] || DEFAULT_EXPECT, false, webkit));
     }
   }
 

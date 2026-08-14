@@ -21,6 +21,8 @@ const scrollHarness = readFileSync(join(root, 'test', 'scroll', 'harness.mjs'), 
 const scrollRunner = readFileSync(join(root, 'test', 'scroll', 'run.mjs'), 'utf8');
 const scrollMirror = readFileSync(join(root, 'test', 'scroll', 'mirror.mjs'), 'utf8');
 const ci = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8');
+const scrollWebkit = readFileSync(join(root, 'test', 'scroll', 'webkit.mjs'), 'utf8');
+const gitignore = readFileSync(join(root, '.gitignore'), 'utf8');
 // The page is one self-contained file; pull its inline script out for checks
 // that need the JS on its own.
 const appScript = (appHtml.match(/<script>([\s\S]*?)<\/script>/i) || [, ''])[1];
@@ -1317,6 +1319,21 @@ test('the scroll harness drives real touch, never a programmatic scroll', () => 
   // Touch input does not exist at all without these two.
   assert.ok(scrollHarness.includes('Emulation.setTouchEmulationEnabled'), 'touch emulation must be on');
   assert.ok(/mobile: true/.test(scrollHarness), 'the viewport must be emulated as mobile');
+});
+
+test('WebKit is optional and never a hidden dependency of the harness', () => {
+  // The pan test drives Chromium because only Chromium can synthesize a trusted
+  // touch drag. WebKit answers the other half — what the reader can reach — and
+  // that half is engine-sensitive, so it is worth having and must stay optional:
+  // it is the one piece needing an npm install.
+  assert.ok(/await import\('playwright-core'\)/.test(scrollWebkit),
+    'playwright-core must be imported dynamically so its absence is not fatal');
+  assert.ok(/install-deps webkit/.test(scrollWebkit),
+    'record the step that actually blocks a WebKit install: the download succeeds, '
+    + 'then validation fails on missing system libraries');
+  assert.ok(/webkitAvailable/.test(scrollRunner) && /SKIP --webkit/.test(scrollRunner),
+    '--webkit must degrade to a clear skip, not an error');
+  assert.ok(/node_modules\//.test(gitignore), 'node_modules must never be committed');
 });
 
 test('the harness does not run itself when node --test discovers it', () => {

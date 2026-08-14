@@ -49,6 +49,38 @@ async function drag(page, { from = 600, to = 100, step = 25, x = VIEWPORT.width 
   await page.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
 }
 
+// Content rendered below everything the reader can reach. A page can pan
+// perfectly and still strand its last screenful: scroll to the very bottom and
+// ask what is *still* below the fold. Anything there is laid out but
+// unreachable — "there is text at the bottom I cannot scroll into", which no
+// amount of lock-watching or pan-testing detects, because nothing is locked and
+// the drag works fine.
+export const REACH_PROBE = `(() => {
+  const startedAt = window.scrollY;
+  window.scrollTo(0, 1e7);
+  const reached = window.scrollY;
+  const de = document.scrollingElement;
+  const stranded = [];
+  for (const el of document.body.querySelectorAll('*')) {
+    if (!el.firstChild || el.children.length) continue;      // leaves carry the text
+    const text = (el.textContent || '').trim();
+    if (!text) continue;
+    const r = el.getBoundingClientRect();
+    if (r.height === 0 || r.top < window.innerHeight) continue;
+    stranded.push({ below: Math.round(r.top - window.innerHeight), text: text.slice(0, 80) });
+  }
+  stranded.sort((a, b) => a.below - b.below);
+  window.scrollTo(0, startedAt);
+  return {
+    maxScroll: Math.max(0, Math.round(de.scrollHeight - window.innerHeight)),
+    reached: Math.round(reached),
+    // Non-zero means the document claims more scroll than it will give up.
+    shortfall: Math.max(0, Math.round(de.scrollHeight - window.innerHeight - reached)),
+    strandedCount: stranded.length,
+    stranded: stranded.slice(0, 3),
+  };
+})()`;
+
 // What is under the reader's finger, and can it pan? Mirrors the `lock.pan`
 // probe the bug reporter collects, so a harness run and a filed report describe
 // the same page in the same words.

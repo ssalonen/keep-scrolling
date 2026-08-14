@@ -35,9 +35,19 @@ serves it from localhost and lets it hydrate offline. (A browser often cannot
 use an agent HTTPS_PROXY even when `curl` can — mirroring with Node's `fetch`
 sidesteps that entirely.)
 
-**This drives Chromium; iPhones run WebKit.** A green run is evidence, not
-proof. Say which engine a result came from, and treat an on-device check as the
-last word on any scrolling fix.
+**The pan test drives Chromium; iPhones run WebKit.** Only Chromium can
+synthesize a trusted touch drag, so that half is Chromium-only. Add `--webkit`
+for the other half — how much scroll the document actually gives up, and whether
+anything is laid out below what the reader can reach. Reach for it whenever the
+complaint is *"there is text at the bottom I cannot scroll into"*: nothing is
+locked and the drag works, so only reachability explains it.
+
+If `--webkit` skips: the download succeeds and then fails validation on missing
+system libraries — `npx playwright install-deps webkit` (needs root/apt) is the
+fix, not a network problem.
+
+Say which engine a result came from, and treat an on-device check as the last
+word on any scrolling fix.
 
 Every case runs twice — without the content script and with it — and prints how
 far each panned plus the lock state and the element that blocked the drag. Needs
