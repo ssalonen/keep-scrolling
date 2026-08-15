@@ -229,6 +229,24 @@
 
     <!-- Filled in from SYMPTOMS in report.js, so the label you tap and the line
          the issue gets are the same string. -->
+    <div class="field">
+      <label id="scroll-test-label">Is the page stuck right now?</label>
+      <small>Measures it here, on this page, instead of describing it — the
+        result goes into the report.</small>
+      <button type="button" class="inline" id="scroll-test"
+              aria-describedby="scroll-test-label">Test scrolling</button>
+      <p class="status" id="scroll-test-result"></p>
+    </div>
+
+    <div class="field">
+      <label id="baseline-label">Compare with the extension off</label>
+      <small>Reloads this page once without Keep Scrolling, so you can file a
+        second report showing the same page untouched. The pair is what makes a
+        report conclusive.</small>
+      <button type="button" class="inline" id="baseline"
+              aria-describedby="baseline-label">Reload without the extension</button>
+    </div>
+
     <label id="symptoms-label">What went wrong? Tick all that apply</label>
     <div id="symptoms" role="group" aria-labelledby="symptoms-label"></div>
 

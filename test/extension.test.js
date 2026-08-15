@@ -442,6 +442,13 @@ test('the collector runs on the same hosts as the nag scripts and only reads the
   for (const mutation of ['.remove()', 'setAttribute', 'classList', 'appendChild', 'innerHTML =']) {
     assert.ok(!code.includes(mutation), `collector must not mutate the page (found ${mutation})`);
   }
+  // Two side effects are allowed, both user-initiated from the popup and
+  // neither touching the DOM: the scroll test (which restores the position it
+  // started from) and the baseline reload. Nothing else may reach the page.
+  assert.ok(
+    /location\.reload/.test(code) && /pause-once/.test(code),
+    'the baseline reload is the only navigation the collector may cause',
+  );
 });
 
 test('reporter scripts are syntactically valid', () => {
@@ -462,6 +469,63 @@ test('the X script releases the lock when a finger lands, not only on mutations'
     /passive: true/.test(scriptX),
     'the listener must be passive — it must never be able to delay or cancel a scroll',
   );
+});
+
+test('the collector measures the scroll instead of asking the reader to describe it', () => {
+  // Three reports in a row said "the page will not scroll" and arrived with
+  // every collected field saying the page was fine. The reader was right each
+  // time; a snapshot is a state and this is a behaviour.
+  assert.ok(/function scrollTest/.test(scriptCollect), 'scrollTest() must exist');
+  assert.ok(/function verdictFor/.test(scriptCollect),
+    'the report must say what the numbers mean, not leave them to be interpreted');
+  // It must put the page back: a diagnostic that leaves the reader somewhere
+  // else in the thread is its own bug report.
+  assert.ok(
+    /window\.scrollTo\(0, started\)/.test(scriptCollect),
+    'the scroll test must restore the original position',
+  );
+  // A programmatic scroll sails past touch-action, so the verdict has to lean
+  // on the pan probe for exactly that case.
+  assert.ok(/pan && pan\.blocked/.test(scriptCollect),
+    'the verdict must account for a cover that only a finger would hit');
+  assert.ok(/scrollTest: snapshot\.scrollTest/.test(scriptReport),
+    'the measurement must reach the issue body');
+  assert.ok(/id="scroll-test"/.test(reportHtml), 'the popup needs the button');
+});
+
+test('the extension annotates its own edits so a snapshot separates them', () => {
+  // A report is a snapshot taken AFTER the scripts ran, so without markers
+  // there is no way to tell our edits from the site's markup — which is why
+  // telling them apart took a second, extension-off capture and a whole
+  // debugging session.
+  assert.ok(/data-xnr-defused/.test(scriptX),
+    'a rewritten link must record what it was before');
+  assert.ok(
+    /if \(!el\.hasAttribute\(DEFUSED_ATTR\)\)/.test(scriptX),
+    'only the first rewrite is the original — a later pass must not overwrite it',
+  );
+  assert.ok(/function noteRelease/.test(scriptX), 'lock releases must be counted');
+  assert.ok(/data-xnr-releases/.test(scriptX) && /data-xnr-last-lock/.test(scriptX),
+    'the tally must be readable from the page');
+  assert.ok(/function describeEdits/.test(scriptCollect), 'the report must carry the tally');
+  assert.ok(/edits: snapshot\.edits/.test(scriptReport), 'the issue body must carry it too');
+});
+
+test('a one-shot pause lets the reader capture the same page untouched', () => {
+  // The paired capture is what showed X escalating from banner to blocking
+  // modal. Getting it must not require a trip to Settings.
+  for (const [name, src] of [['reddit', script], ['x', scriptX]]) {
+    assert.ok(
+      /sessionStorage\.getItem\('keep-scrolling:pause-once'\)/.test(src),
+      `${name} script must honour the pause flag`,
+    );
+    assert.ok(
+      /removeItem\('keep-scrolling:pause-once'\)/.test(src),
+      `${name} script must clear the flag immediately — a stuck flag would `
+        + 'silently disable the extension',
+    );
+  }
+  assert.ok(/id="baseline"/.test(reportHtml), 'the popup needs the button');
 });
 
 test('the collector can tell a flickering lock from no lock at all', () => {

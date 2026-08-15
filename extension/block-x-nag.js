@@ -42,6 +42,20 @@
 (() => {
   'use strict';
 
+  // One-shot baseline capture. A bug report is far easier to act on next to the
+  // same page with the extension off — that pair is what finally showed X
+  // escalating from a banner to a blocking modal when the banner is hidden.
+  // Getting it used to mean a trip to Settings and back; the popup can instead
+  // set this flag, and the very next page load renders untouched so the reader
+  // can capture the "before". It clears itself immediately, so a forgotten flag
+  // cannot silently disable the extension.
+  try {
+    if (sessionStorage.getItem('keep-scrolling:pause-once') !== null) {
+      sessionStorage.removeItem('keep-scrolling:pause-once');
+      return;
+    }
+  } catch { /* storage unavailable (private mode, partitioned): just run */ }
+
   const APP_STORE_MARKER = 'launch_app_store=true';
   const APP_STORE_LINK_SELECTOR = 'a[href*="launch_app_store=true"]';
   const APP_STORE_HREF_SELECTOR =
@@ -58,6 +72,13 @@
   // re-render does not undo it and does not fight us over the style attribute.
   const HIDDEN_ATTR = 'data-xnr-hidden';
   const HIDDEN_SELECTOR = '[data-xnr-hidden]';
+  // What a link looked like before defuseAppStoreLinks() rewrote it. A bug
+  // report is a snapshot of the page *after* this script ran, so without this
+  // there is no way to tell our edits from the site's own markup — which cost a
+  // full debugging session to work out by hand from a second, extension-off
+  // capture. Recording the original next to the rewrite makes the "before"
+  // derivable from the "after", from one capture.
+  const DEFUSED_ATTR = 'data-xnr-defused';
   // Base UI's own marker for "this document is scroll-locked". X moved its
   // logged-out prompts from `vaul` onto Base UI, whose lock is a different
   // shape again — see releaseBaseUiLock().
@@ -94,6 +115,7 @@
       }
     }
     html.removeAttribute(BASE_UI_LOCK_ATTR);
+    noteRelease('base-ui');
     if (offset > 0) {
       try { window.scrollTo(0, offset); } catch { /* ignore */ }
     }
@@ -102,6 +124,20 @@
   // --- Release the page scroll (inline lock styles only) ---------------------
   // Only ever clears *inline* values, so a stylesheet-driven overflow rule
   // (i.e. the page's own layout) is left alone.
+  // How many locks this script has actually undone, and which shape the last
+  // one was. Recorded on our own <style> element — a node the page does not
+  // own, so this cannot disturb anything — because "did the extension do
+  // something here?" is otherwise unanswerable from a snapshot: a lock that was
+  // released leaves exactly as little trace as a lock that never existed.
+  let releases = 0;
+  function noteRelease(shape) {
+    releases += 1;
+    const style = document.getElementById('xnr-style');
+    if (!style) return;
+    style.setAttribute('data-xnr-releases', String(releases));
+    style.setAttribute('data-xnr-last-lock', shape);
+  }
+
   function releaseScroll() {
     // First, because it reads back a scroll offset that clearing the inline
     // overflow below would reset to 0.
@@ -112,8 +148,8 @@
       const s = el.style;
 
       // 1. The original lock: style="overflow: hidden".
-      if (s.overflow === 'hidden') s.overflow = '';
-      if (s.overflowY === 'hidden') s.overflowY = '';
+      if (s.overflow === 'hidden') { s.overflow = ''; noteRelease('inline-overflow'); }
+      if (s.overflowY === 'hidden') { s.overflowY = ''; noteRelease('inline-overflow-y'); }
       // Base UI's mobile path sets both axes. overflow-x on its own does not
       // freeze the page, but leaving it behind clips the layout sideways.
       if (s.overflowX === 'hidden') s.overflowX = '';
@@ -124,6 +160,7 @@
       //    whole set together and scroll back to where the user was — dropping
       //    `position` on its own teleports them to the top.
       if (s.position === 'fixed') {
+        noteRelease('vaul-pinned');
         const offset = parseInt(s.top, 10);
         for (const prop of ['position', 'top', 'left', 'right', 'width', 'height']) {
           s.removeProperty(prop);
@@ -141,8 +178,8 @@
       //    the shape issue #25 turned out to have (there, on the modal rather
       //    than on <body> — but if X ever moves it here, overflow-watching
       //    would miss it completely).
-      if (s.pointerEvents === 'none') s.pointerEvents = '';
-      if (s.touchAction === 'none') s.touchAction = '';
+      if (s.pointerEvents === 'none') { s.pointerEvents = ''; noteRelease('inline-pointer-events'); }
+      if (s.touchAction === 'none') { s.touchAction = ''; noteRelease('inline-touch-action'); }
       s.removeProperty('padding-right');
     }
   }
@@ -217,6 +254,9 @@
         const val = el.getAttribute(attr);
         if (val && val.includes(APP_STORE_MARKER)) {
           el.setAttribute(attr, stripAppStoreParam(val));
+          // Only the first rewrite is the original; a later pass over a
+          // re-rendered link must not overwrite it with our own output.
+          if (!el.hasAttribute(DEFUSED_ATTR)) el.setAttribute(DEFUSED_ATTR, val);
           hit = true;
         }
       }

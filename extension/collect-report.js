@@ -35,6 +35,12 @@
   if (!api || !api.runtime || !api.runtime.onMessage) return;
 
   const COLLECT_MESSAGE = 'keep-scrolling:collect';
+  // Measure the scroll here, on the device, instead of asking the reader to
+  // describe it. See scrollTest().
+  const SCROLL_TEST_MESSAGE = 'keep-scrolling:scroll-test';
+  // Reload once with the nag scripts paused, so the reader can capture the same
+  // page untouched. The scripts clear the flag themselves on that load.
+  const BASELINE_MESSAGE = 'keep-scrolling:baseline';
 
   // Caps. The prefilled URL is budgeted separately and much tighter (see
   // report.js); these only stop us from moving a multi-megabyte string across
@@ -67,6 +73,11 @@
     // What the X script marked as a nag and hid. Reported so "we never matched
     // it" and "we hid it and it is still on screen" stay distinguishable.
     '[data-xnr-hidden]',
+    // Links the X script rewrote, each carrying its original href. This is what
+    // makes the extension's own edits separable from the site's markup in a
+    // snapshot taken after it ran — otherwise the only way to tell them apart
+    // is a second capture with the extension disabled.
+    '[data-xnr-defused]',
     // Content placeholders that never resolved. X ends a logged-out post page
     // with `<div role="status" aria-label="Loading post">` skeletons, and a
     // page that ends in those is short — which the reader experiences as "it
@@ -278,6 +289,82 @@
     });
   }
 
+  // Try to scroll the page and report what happened.
+  //
+  // Every report so far has had to travel through a sentence — "the page will
+  // not scroll" — and three of them arrived with every collected field saying
+  // the page was fine. The reader was right each time and the snapshot could
+  // not show it, because a snapshot is a state and this is a behaviour.
+  //
+  // So: measure it where it happens. Scroll, read back, and say how far it
+  // actually went, what refused it, and how much page there was to move. That
+  // is the same set of numbers the headless harness prints, taken on the engine
+  // that matters at the moment it is broken — which is the difference between a
+  // report we can act on and an hour of forensics.
+  //
+  // A caveat kept in the output rather than hidden: this is a programmatic
+  // scroll, so `touch-action` does not apply to it the way it applies to a
+  // finger. `blockedBy` is what covers that gap — it names the element whose
+  // computed touch-action forbids a vertical pan, which is the thing a
+  // programmatic scroll would sail straight past.
+  function scrollTest() {
+    const scroller = document.scrollingElement;
+    if (!scroller) return { error: 'no scrolling element' };
+    const viewport = window.innerHeight;
+    const started = window.scrollY;
+    const maxScroll = Math.max(0, Math.round(scroller.scrollHeight - viewport));
+
+    // Aim for most of a screen, which is what a flick is worth, and never past
+    // the end — asking for more than exists would look like a failure to move.
+    const target = Math.min(started + Math.round(viewport * 0.75), maxScroll);
+    let moved = 0;
+    try {
+      window.scrollTo(0, target);
+      moved = Math.round(window.scrollY - started);
+      window.scrollTo(0, started);
+    } catch (error) {
+      return { error: String((error && error.message) || error) };
+    }
+
+    const pan = describeTouchTarget();
+    return {
+      moved,
+      asked: target - started,
+      maxScroll,
+      screens: viewport ? Math.round((scroller.scrollHeight / viewport) * 10) / 10 : 0,
+      startedAt: Math.round(started),
+      // What the numbers mean, decided here so the issue does not have to be
+      // interpreted by whoever reads it.
+      verdict: verdictFor(moved, target - started, maxScroll, pan),
+      blockedBy: pan && pan.blocked ? pan.by : undefined,
+      touchAction: pan && pan.blocked ? pan.touchAction : undefined,
+    };
+  }
+
+  function verdictFor(moved, asked, maxScroll, pan) {
+    if (pan && pan.blocked) return 'something over the page refuses a vertical drag';
+    if (maxScroll <= 4) return 'there is no page to scroll — the document is not taller than the screen';
+    if (asked > 4 && moved <= 4) return 'the page refused to scroll at all';
+    if (asked > 4 && moved < asked - 4) return 'the page scrolled less than it was asked to';
+    if (maxScroll < window.innerHeight) return 'the page scrolls, but there is less than one screen of it';
+    return 'the page scrolled normally';
+  }
+
+  function describeEdits() {
+    const style = document.getElementById(SCRIPT_MARKERS.x)
+      || document.getElementById(SCRIPT_MARKERS.reddit);
+    let hidden = 0;
+    let defused = 0;
+    try { hidden = document.querySelectorAll('[data-xnr-hidden]').length; } catch { /* ignore */ }
+    try { defused = document.querySelectorAll('[data-xnr-defused]').length; } catch { /* ignore */ }
+    return {
+      hidden,
+      defused,
+      locksReleased: style ? Number(style.getAttribute('data-xnr-releases') || 0) : 0,
+      lastLock: (style && style.getAttribute('data-xnr-last-lock')) || undefined,
+    };
+  }
+
   // The half of the problem a user can actually feel: is the page frozen?
   function describeScrollLock() {
     const scroller = document.scrollingElement;
@@ -396,6 +483,12 @@
       language: navigator.language,
       viewport: `${window.innerWidth}x${window.innerHeight} @${window.devicePixelRatio}x`,
       readyState: document.readyState,
+      // What the nag scripts did to this page, straight from the markers they
+      // leave: how many locks were released and what shape the last one was.
+      // A released lock leaves as little trace as a lock that never existed, so
+      // without this "we fixed it" and "there was nothing there" are the same
+      // report.
+      edits: describeEdits(),
       scriptsActive: {
         reddit: !!document.getElementById(SCRIPT_MARKERS.reddit),
         x: !!document.getElementById(SCRIPT_MARKERS.x),
@@ -409,6 +502,24 @@
   }
 
   api.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message && message.type === BASELINE_MESSAGE) {
+      // The one thing in this file that is not read-only, and it is deliberate:
+      // it changes no markup, only asks for the next load to skip the nag
+      // scripts. Answer first, then reload — the reply cannot survive it.
+      try {
+        sessionStorage.setItem('keep-scrolling:pause-once', '1');
+        sendResponse({ ok: true });
+        setTimeout(() => { location.reload(); }, 0);
+      } catch (error) {
+        sendResponse({ error: String((error && error.message) || error) });
+      }
+      return true;
+    }
+    if (message && message.type === SCROLL_TEST_MESSAGE) {
+      try { sendResponse(scrollTest()); }
+      catch (error) { sendResponse({ error: String((error && error.message) || error) }); }
+      return true;
+    }
     if (!message || message.type !== COLLECT_MESSAGE) return undefined;
     // The lock watch is the one part that cannot be read instantly: half a
     // second of sampling is what separates "nothing is locked" from "something

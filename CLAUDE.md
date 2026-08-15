@@ -291,6 +291,17 @@ snapshot", and iOS gives a user no way to do that. Full design:
   the link is stored extension-less; it sends **no CORS headers** and 404s
   `OPTIONS`, so the request must stay CORS-simple and needs `host_permissions`;
   and it is **heavily rate limited**, so every path degrades to the clipboard.
+- The popup can **measure** the scroll (`scrollTest()`) rather than relying on
+  the reader's description, **annotate** the extension's own edits
+  (`data-xnr-defused` carries the original href; `data-xnr-releases` /
+  `data-xnr-last-lock` tally undone locks), and **reload once with the scripts
+  paused** for a baseline capture. Those three exist because three reports in a
+  row read healthy while the page was frozen, and because the one artefact that
+  finally explained anything was a matched with/without pair.
+- IMPORTANT: `collect-report.js` is **read-only** for the DOM. Two
+  user-initiated exceptions, both from the popup and neither touching markup:
+  the scroll test (which restores the position it started from) and the
+  baseline reload.
 - IMPORTANT: `collect-report.js` is **read-only**. It is a third content script
   precisely so a diagnostics bug cannot take the nag removal down with it; the
   tests fail if `.remove()`, `setAttribute`, `classList`, `appendChild` or
