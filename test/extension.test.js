@@ -21,6 +21,7 @@ const scrollHarness = readFileSync(join(root, 'test', 'scroll', 'harness.mjs'), 
 const scrollRunner = readFileSync(join(root, 'test', 'scroll', 'run.mjs'), 'utf8');
 const scrollMirror = readFileSync(join(root, 'test', 'scroll', 'mirror.mjs'), 'utf8');
 const ci = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8');
+const security = readFileSync(join(root, '.github', 'workflows', 'security.yml'), 'utf8');
 const scrollWebkit = readFileSync(join(root, 'test', 'scroll', 'webkit.mjs'), 'utf8');
 const gitignore = readFileSync(join(root, '.gitignore'), 'utf8');
 // The page is one self-contained file; pull its inline script out for checks
@@ -1424,6 +1425,24 @@ test('WebKit is optional and never a hidden dependency of the harness', () => {
   assert.ok(/webkitAvailable/.test(scrollRunner) && /SKIP --webkit/.test(scrollRunner),
     '--webkit must degrade to a clear skip, not an error');
   assert.ok(/node_modules\//.test(gitignore), 'node_modules must never be committed');
+});
+
+test('CodeQL still covers everything that actually ships', () => {
+  // The scroll harness is scoped out because "download a page and write it to
+  // disk" is its purpose, not a defect. That is only defensible while the
+  // shipped code stays fully in scope — so pin it.
+  const config = readFileSync(join(root, '.github', 'codeql-config.yml'), 'utf8');
+  for (const shipped of ['extension', 'app']) {
+    assert.ok(
+      new RegExp(`^\\s*-\\s*${shipped}\\s*$`, 'm').test(config),
+      `${shipped}/ must stay in CodeQL scope — it is what runs on a user's phone`,
+    );
+  }
+  assert.ok(
+    /config-file: \.\/\.github\/codeql-config\.yml/.test(security),
+    'the workflow must actually use the config',
+  );
+  assert.ok(/security-extended/.test(security), 'keep the extended query set');
 });
 
 test('the harness does not run itself when node --test discovers it', () => {

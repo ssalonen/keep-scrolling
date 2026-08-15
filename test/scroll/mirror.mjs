@@ -17,7 +17,7 @@
 // server rendered. That is a faithful copy of the *document*, not of a logged-
 // in session — say so when reporting a result from it.
 
-import { mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, openSync, fstatSync, closeSync } from 'node:fs';
 import { dirname, join, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
@@ -152,11 +152,26 @@ export async function serve(dir) {
     if (!segments || !segments.length) { res.writeHead(404); res.end('not mirrored'); return; }
     const base = resolve(dir);
     const file = join(base, ...segments);
-    if (!file.startsWith(base + sep) || !existsSync(file) || !statSync(file).isFile()) {
-      res.writeHead(404); res.end('not mirrored'); return;
+    if (!file.startsWith(base + sep)) { res.writeHead(404); res.end('not mirrored'); return; }
+
+    // Open once and interrogate the *handle*, never the path. Checking with
+    // existsSync/statSync and then reading by name is two lookups of a name
+    // that can point somewhere else in between — the classic time-of-check /
+    // time-of-use race, and a mirror directory is written by a page we do not
+    // control, so its contents are exactly the sort of thing that can change
+    // underfoot.
+    let fd;
+    try {
+      fd = openSync(file, 'r');
+      if (!fstatSync(fd).isFile()) { res.writeHead(404); res.end('not mirrored'); return; }
+      const body = readFileSync(fd);
+      res.writeHead(200, { 'Content-Type': TYPES[extname(file)] || 'application/octet-stream' });
+      res.end(body);
+    } catch {
+      res.writeHead(404); res.end('not mirrored');
+    } finally {
+      if (fd !== undefined) closeSync(fd);
     }
-    res.writeHead(200, { 'Content-Type': TYPES[extname(file)] || 'application/octet-stream' });
-    res.end(readFileSync(file));
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const { port } = server.address();
