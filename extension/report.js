@@ -37,6 +37,14 @@ const api = globalThis.browser || globalThis.chrome;
 const REPO = 'ssalonen/keep-scrolling';
 const NEW_ISSUE_URL = `https://github.com/${REPO}/issues/new`;
 const COLLECT_MESSAGE = 'keep-scrolling:collect';
+// Asks the collector to actually try scrolling the page and report what
+// happened. This is the one field that turns "it will not scroll" from a
+// sentence into a measurement, taken on the device, in WebKit, at the moment
+// it is broken — see collect-report.js's scrollTest().
+const SCROLL_TEST_MESSAGE = 'keep-scrolling:scroll-test';
+// Reloads the page once with the nag scripts paused, so the reader can capture
+// the same page untouched without going to Settings and back.
+const BASELINE_MESSAGE = 'keep-scrolling:baseline';
 
 // The one endpoint this extension ever sends anything to, and only when the
 // user ticks the upload box and then presses the file button. A GitHub issue
@@ -391,8 +399,17 @@ function describeSnapshot(snapshot, buildInfo) {
     ])),
   };
 
-  const pageState = lock || signatures.length
-    ? JSON.stringify({ lock, signatures: counts }, null, 2)
+  // The measured scroll goes in the same block as the lock state: one says what
+  // the page looked like, the other says what it did.
+  const pageState = lock || signatures.length || snapshot.scrollTest
+    ? JSON.stringify({
+      scrollTest: snapshot.scrollTest,
+      // What the extension itself changed, so its edits are separable from the
+      // site's own markup in the snapshot below.
+      edits: snapshot.edits,
+      lock,
+      signatures: counts,
+    }, null, 2)
     : '';
 
   // Trimmed to fit: the point of this block is that it survives the URL trim,
@@ -515,6 +532,22 @@ async function readBuildInfo() {
   }
 }
 
+// Never throws, for the same reason readSnapshot() does not.
+async function runScrollTest() {
+  let tab;
+  try {
+    const tabs = await api.tabs.query({ active: true, currentWindow: true });
+    tab = tabs && tabs[0];
+  } catch { /* no tabs access at all */ }
+  if (!tab) return { error: 'no active tab' };
+  try {
+    const result = await api.tabs.sendMessage(tab.id, { type: SCROLL_TEST_MESSAGE });
+    return result || { error: 'no answer from the page' };
+  } catch {
+    return { error: 'the extension is not allowed on this page' };
+  }
+}
+
 // Never throws: a report with no page details is still worth filing, and an
 // exception here would leave the popup with dead buttons and no explanation.
 async function readSnapshot() {
@@ -583,6 +616,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   const fileButton = document.getElementById('file');
   const copyButton = document.getElementById('copy');
   const pageLabel = document.getElementById('page');
+  const scrollTestButton = document.getElementById('scroll-test');
+  const scrollTestResult = document.getElementById('scroll-test-result');
+  const baselineButton = document.getElementById('baseline');
 
   renderSymptoms(symptomList);
   const selectedSymptoms = () => {
@@ -593,7 +629,41 @@ document.addEventListener('DOMContentLoaded', async () => {
   };
 
   const [buildInfo, snapshot] = await Promise.all([readBuildInfo(), readSnapshot()]);
-  const { environment, pageState, diagnostics, samples } = describeSnapshot(snapshot, buildInfo);
+  // Reassigned when the scroll test runs — the measurement has to reach the
+  // body the user is about to file, not just the popup.
+  let { environment, pageState, diagnostics, samples } = describeSnapshot(snapshot, buildInfo);
+
+  // Measuring the scroll is a user action, not something done on open: it moves
+  // the page (and puts it back), and the reader should be the one who decides
+  // when that is acceptable. Re-rendering the preview afterwards is what puts
+  // the result into the report the user is about to file.
+  scrollTestButton.addEventListener('click', async () => {
+    scrollTestButton.disabled = true;
+    scrollTestResult.textContent = 'Testing…';
+    const result = await runScrollTest();
+    snapshot.scrollTest = result;
+    scrollTestResult.textContent = result.error
+      ? `Could not test: ${result.error}`
+      : `${result.verdict} — moved ${result.moved}px of ${result.maxScroll}px available `
+        + `(${result.screens} screens)${result.blockedBy ? `, blocked by ${result.touchAction}` : ''}`;
+    scrollTestButton.disabled = false;
+    ({ environment, pageState, diagnostics, samples } = describeSnapshot(snapshot, buildInfo));
+    refresh();
+  });
+
+  // The popup closes as the page reloads, which is the whole point: what the
+  // reader wants next is this page without us, to report on separately.
+  baselineButton.addEventListener('click', async () => {
+    baselineButton.disabled = true;
+    let tab;
+    try {
+      const tabs = await api.tabs.query({ active: true, currentWindow: true });
+      tab = tabs && tabs[0];
+    } catch { /* no tabs access */ }
+    if (!tab) { baselineButton.disabled = false; return; }
+    try { await api.tabs.sendMessage(tab.id, { type: BASELINE_MESSAGE }); }
+    catch { baselineButton.disabled = false; }
+  });
 
   // The title tracks the ticked symptoms until the user types their own.
   let titleEdited = false;
