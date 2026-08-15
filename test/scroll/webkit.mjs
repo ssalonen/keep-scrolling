@@ -23,7 +23,7 @@
 //                                        # (libwoff2, libgstreamer, libenchant,
 //                                        # libmanette, …). Needs root/apt.
 
-import { REACH_PROBE } from './harness.mjs';
+import { REACH_PROBE, sameOrigin } from './harness.mjs';
 
 const VIEWPORT = { width: 440, height: 796 };
 
@@ -46,7 +46,7 @@ export async function reachTest({ url, inject, allowOrigin, settle = 600 }) {
     await context.route('**/*', (route) => {
       const target = route.request().url();
       const local = target.startsWith('file://') || target.startsWith('data:')
-        || (allowOrigin && target.startsWith(allowOrigin));
+        || (allowOrigin && sameOrigin(target, allowOrigin));
       return local ? route.continue() : route.abort();
     });
     if (inject) await context.addInitScript(inject);

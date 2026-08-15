@@ -26,6 +26,14 @@ import { launch, newPage } from './cdp.mjs';
 
 const VIEWPORT = { width: 440, height: 796 };
 
+// Origin equality, not a substring test: `http://127.0.0.1:8080` is a prefix of
+// `http://127.0.0.1:8080.example.com`, so startsWith() would let the live site
+// back into a run that is supposed to be sealed off from it.
+export function sameOrigin(url, origin) {
+  try { return new URL(url).origin === new URL(origin).origin; } catch { return false; }
+}
+
+
 async function evaluate(page, expression) {
   const { result, exceptionDetails } = await page.send('Runtime.evaluate', {
     expression,
@@ -140,7 +148,7 @@ export async function panTest({ url, inject, offline = true, allowOrigin, settle
       // request instead.
       await page.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
       page.on('Fetch.requestPaused', ({ requestId, request }) => {
-        const allowed = request.url.startsWith(allowOrigin) || request.url.startsWith('data:');
+        const allowed = sameOrigin(request.url, allowOrigin) || request.url.startsWith('data:');
         page.send(allowed ? 'Fetch.continueRequest' : 'Fetch.failRequest',
           allowed ? { requestId } : { requestId, errorReason: 'BlockedByClient' }).catch(() => {});
       });

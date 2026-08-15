@@ -18,7 +18,7 @@
 // in session — say so when reporting a result from it.
 
 import { mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
-import { dirname, join, extname, resolve } from 'node:path';
+import { dirname, join, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 
@@ -37,19 +37,52 @@ const TYPES = {
 // arrives with holes and nothing executes.
 const RELATIVE = /["'(](\.\/[A-Za-z0-9._-]+\.(?:js|css))["')]/g;
 const ABSOLUTE = /https:\/\/[a-z0-9.-]*\.(?:twimg|redditstatic|redditmedia)\.com\/[A-Za-z0-9._/-]+\.(?:js|css|woff2?)/g;
+// The asset hosts the two supported sites serve their bundles from. Mirroring
+// follows links found inside fetched documents, so this is the fence.
+const ASSET_HOSTS = [
+  'abs.twimg.com', 'pbs.twimg.com', 'video.twimg.com',
+  'www.redditstatic.com', 'styles.redditmedia.com',
+];
+
+// Every path below is built from a URL that came out of a page we do not
+// control, so none of it may be trusted to stay inside the output directory:
+// `/a/../../etc/x` is a perfectly ordinary-looking pathname. Resolve, then
+// require real containment — `startsWith(root)` alone also accepts `/tmp/mirror-evil`
+// for a root of `/tmp/mirror`, which is why the separator is part of the test.
+function within(root, ...parts) {
+  const base = resolve(root);
+  const full = resolve(base, ...parts);
+  return full === base || full.startsWith(base + sep) ? full : null;
+}
+
+// Only http(s), and only hosts the page itself is built from. This is a
+// developer tool pointed at a page by hand, but it then follows URLs found
+// *inside* that page, and "follow whatever the document says" is how a mirror
+// turns into a request-forgery gadget aimed at localhost or a metadata service.
+function fetchable(url, allowedHosts) {
+  let u;
+  try { u = new URL(url); } catch { return null; }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+  return allowedHosts.has(u.host) ? u : null;
+}
 
 export async function mirror(pageUrl, outDir, { log = () => {} } = {}) {
   const seen = new Set();
   let bytes = 0;
   let failed = 0;
+  // The page's own host, plus the asset CDNs the ABSOLUTE pattern already
+  // limits us to. Filled in once the page URL is parsed.
+  const allowedHosts = new Set();
 
   async function grab(url) {
     if (seen.has(url)) return null;
     seen.add(url);
-    const u = new URL(url);
-    const file = join(outDir, u.host + u.pathname);
+    const u = fetchable(url, allowedHosts);
+    if (!u) { failed += 1; return null; }
+    const file = within(outDir, u.host, `.${u.pathname}`);
+    if (!file) { failed += 1; return null; }
     try {
-      const res = await fetch(url, { headers: { 'User-Agent': IPHONE_UA } });
+      const res = await fetch(u, { headers: { 'User-Agent': IPHONE_UA }, redirect: 'follow' });
       if (!res.ok) { failed += 1; return null; }
       const body = Buffer.from(await res.arrayBuffer());
       mkdirSync(dirname(file), { recursive: true });
@@ -69,7 +102,12 @@ export async function mirror(pageUrl, outDir, { log = () => {} } = {}) {
     for (const ref of refs) await walk(ref, depth + 1);
   }
 
-  const html = await grab(pageUrl);
+  const page = fetchable(pageUrl, new Set([new URL(pageUrl).host]));
+  if (!page) throw new Error(`not an http(s) URL: ${pageUrl}`);
+  allowedHosts.add(page.host);
+  for (const host of ASSET_HOSTS) allowedHosts.add(host);
+
+  const html = await grab(page.href);
   if (html === null) throw new Error(`could not fetch ${pageUrl}`);
   mkdirSync(outDir, { recursive: true });
   writeFileSync(
@@ -85,9 +123,10 @@ export async function mirror(pageUrl, outDir, { log = () => {} } = {}) {
 /** Serve a mirrored tree on localhost. Returns { origin, close }. */
 export async function serve(dir) {
   const server = createServer((req, res) => {
-    const path = decodeURIComponent((req.url || '/').split('?')[0]);
-    const file = join(dir, path === '/' ? 'index.html' : path);
-    if (!file.startsWith(dir) || !existsSync(file) || !statSync(file).isFile()) {
+    let path;
+    try { path = decodeURIComponent((req.url || '/').split('?')[0]); } catch { path = ''; }
+    const file = path && within(dir, `.${path === '/' ? '/index.html' : path}`);
+    if (!file || !existsSync(file) || !statSync(file).isFile()) {
       res.writeHead(404); res.end('not mirrored'); return;
     }
     res.writeHead(200, { 'Content-Type': TYPES[extname(file)] || 'application/octet-stream' });
