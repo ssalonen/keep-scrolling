@@ -45,13 +45,37 @@ const ASSET_HOSTS = [
 ];
 
 // Every path below is built from a URL that came out of a page we do not
-// control, so none of it may be trusted to stay inside the output directory:
-// `/a/../../etc/x` is a perfectly ordinary-looking pathname. Resolve, then
-// require real containment — `startsWith(root)` alone also accepts `/tmp/mirror-evil`
-// for a root of `/tmp/mirror`, which is why the separator is part of the test.
-function within(root, ...parts) {
+// control, so the URL is never allowed to choose the path. Rather than build a
+// path and then try to prove it stayed inside the root — `/a/../../etc/x` is an
+// ordinary-looking pathname, and `startsWith(root)` also accepts
+// `/tmp/mirror-evil` for a root of `/tmp/mirror` — each segment is decoded and
+// tested against a conservative allowlist, and anything else is refused
+// outright. A path made only of `[A-Za-z0-9._-]` segments cannot traverse.
+const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/;
+const SAFE_HOST = /^[A-Za-z0-9.-]+$/;
+
+function safeSegments(pathname) {
+  const out = [];
+  for (const raw of String(pathname).split('/')) {
+    if (!raw) continue;
+    let segment;
+    // Decode first: an encoded `%2e%2e` is the same traversal as `..`.
+    try { segment = decodeURIComponent(raw); } catch { return null; }
+    if (segment === '.' || segment === '..' || !SAFE_SEGMENT.test(segment)) return null;
+    out.push(segment);
+  }
+  return out;
+}
+
+// Root + host + path, or null if any part of it is not plainly a file name.
+function safePath(root, host, pathname) {
+  if (!SAFE_HOST.test(host) || host === '.' || host === '..') return null;
+  const segments = safeSegments(pathname);
+  if (!segments) return null;
+  const full = join(resolve(root), host, ...segments);
+  // Belt and braces: the allowlist above is what makes this safe, but a second
+  // containment check costs nothing and documents the intent.
   const base = resolve(root);
-  const full = resolve(base, ...parts);
   return full === base || full.startsWith(base + sep) ? full : null;
 }
 
@@ -79,7 +103,7 @@ export async function mirror(pageUrl, outDir, { log = () => {} } = {}) {
     seen.add(url);
     const u = fetchable(url, allowedHosts);
     if (!u) { failed += 1; return null; }
-    const file = within(outDir, u.host, `.${u.pathname}`);
+    const file = safePath(outDir, u.host, u.pathname.endsWith('/') ? `${u.pathname}index.html` : u.pathname);
     if (!file) { failed += 1; return null; }
     try {
       const res = await fetch(u, { headers: { 'User-Agent': IPHONE_UA }, redirect: 'follow' });
@@ -123,10 +147,12 @@ export async function mirror(pageUrl, outDir, { log = () => {} } = {}) {
 /** Serve a mirrored tree on localhost. Returns { origin, close }. */
 export async function serve(dir) {
   const server = createServer((req, res) => {
-    let path;
-    try { path = decodeURIComponent((req.url || '/').split('?')[0]); } catch { path = ''; }
-    const file = path && within(dir, `.${path === '/' ? '/index.html' : path}`);
-    if (!file || !existsSync(file) || !statSync(file).isFile()) {
+    const requested = (req.url || '/').split('?')[0];
+    const segments = safeSegments(requested === '/' ? 'index.html' : requested);
+    if (!segments || !segments.length) { res.writeHead(404); res.end('not mirrored'); return; }
+    const base = resolve(dir);
+    const file = join(base, ...segments);
+    if (!file.startsWith(base + sep) || !existsSync(file) || !statSync(file).isFile()) {
       res.writeHead(404); res.end('not mirrored'); return;
     }
     res.writeHead(200, { 'Content-Type': TYPES[extname(file)] || 'application/octet-stream' });
