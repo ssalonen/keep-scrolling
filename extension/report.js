@@ -370,6 +370,7 @@ function describeSnapshot(snapshot, buildInfo) {
   // one block that must never be the thing that gets dropped.
   const lock = snapshot.lock && {
     scrollable: snapshot.lock.scrollable,
+    scroll: snapshot.lock.scroll,
     // Whether a finger can actually pan the page, which `scrollable` does not
     // answer — a full-screen touch-action:none cover leaves every other field
     // in this block reading "healthy". See collect-report.js.
@@ -380,8 +381,30 @@ function describeSnapshot(snapshot, buildInfo) {
     ])),
   };
 
+  // What the nag scripts have been doing, one line per site rather than nested
+  // JSON: this block has to survive the URL trim, and a tally is not a
+  // structure. `lock.pan` names what refuses to move now; this separates "we
+  // never saw a lock" from "we clear one several times a second and the page
+  // still will not move" — which a capture cannot answer, because the release
+  // runs on every pass. Rendered from whatever the script counted, since the
+  // two scripts count different things.
+  const scripts = {};
+  for (const [site, tally] of Object.entries(snapshot.scriptState || {})) {
+    const shapes = Object.entries(tally.shapes || {})
+      .map(([shape, n]) => `${shape}×${n}`).join(' ');
+    const age = tally.sinceLastRelease === null || tally.sinceLastRelease === undefined
+      ? '' : `, last ${tally.sinceLastRelease}ms ago`;
+    scripts[site] = Object.entries(tally.counts || {})
+      .map(([name, n]) => `${name}=${n}`).join(' ')
+      + (shapes ? ` [${shapes}]` : '') + age;
+  }
+
   const pageState = lock || signatures.length
-    ? JSON.stringify({ lock, signatures: counts }, null, 2)
+    ? JSON.stringify({
+      lock,
+      ...(Object.keys(scripts).length ? { scripts } : {}),
+      signatures: counts,
+    }, null, 2)
     : '';
 
   // Trimmed to fit: the point of this block is that it survives the URL trim,

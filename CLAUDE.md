@@ -281,6 +281,18 @@ snapshot", and iOS gives a user no way to do that. Full design:
   is the normal case. `scriptsActive` (are `#rnr-style` / `#xnr-style` present?)
   is what separates "clean page" from "the extension never ran" — if either
   script ever renames its injected `<style>` id, update `SCRIPT_MARKERS`.
+- IMPORTANT: `lock.pan` answers what refuses to move *now*; `scriptState`
+  answers what the script did to get there, and a capture cannot hold that.
+  `releaseScroll()` runs on **every** pass, so a page losing a fight with a
+  lock that keeps being re-applied looks, one frame later, exactly like a page
+  that was never locked. Both nag scripts therefore keep a **counts-only tally**
+  on `globalThis.__keepScrolling` (shared isolated world) — passes, nags
+  hidden/removed, links defused, releases by shape, age of the last one — which
+  the collector reports as `scriptState`. Keep it counts only, keep it to plain
+  property writes (a diagnostics counter must never throw inside the path it
+  counts), and count **every** release branch: an uncounted shape reports a
+  quiet page while that lock is cleared over and over. The tests check the
+  branch count.
 - The popup leads with a **multi-select of the three known failures** (nag still
   visible / page will not scroll / overlay covers the page, plus "something
   else"), because those are different bugs in different code and a tapped box

@@ -46,14 +46,35 @@
 
   const SCROLL_LOCK_CLASSES = ['rpl-scroll-lock', 'scroll-is-blocked'];
 
+  // --- A read-only tally for the bug reporter --------------------------------
+  // Counts what this script actually found and undid, for collect-report.js to
+  // put in an issue — it runs in the same isolated world. See the longer note
+  // in block-x-nag.js: a snapshot taken a frame after a release looks exactly
+  // like a page that was never locked, and the two are opposite diagnoses.
+  const trail = globalThis.__keepScrolling || (globalThis.__keepScrolling = {});
+  // No `defused` count here: this script has no link-rewriting pass. The
+  // reporter renders whatever each script counted, so an always-zero field
+  // would just be noise in the issue.
+  const stats = { passes: 0, removed: 0, released: 0, shapes: {}, lastReleaseAt: 0 };
+  trail.reddit = stats;
+
+  function noteRelease(shape) {
+    stats.released += 1;
+    stats.shapes[shape] = (stats.shapes[shape] || 0) + 1;
+    stats.lastReleaseAt = Date.now();
+  }
+
   // --- Release the page scroll (classes + any inline overflow/padding) --------
   function releaseScroll() {
-    for (const el of [document.documentElement, document.body]) {
+    for (const [where, el] of [['html', document.documentElement], ['body', document.body]]) {
       if (!el) continue;
       for (const c of SCROLL_LOCK_CLASSES) {
-        if (el.classList.contains(c)) el.classList.remove(c);
+        if (el.classList.contains(c)) { el.classList.remove(c); noteRelease(`${where}:${c}`); }
       }
-      if (el.style && el.style.overflow === 'hidden') el.style.overflow = '';
+      if (el.style && el.style.overflow === 'hidden') {
+        el.style.overflow = '';
+        noteRelease(`${where}:overflow`);
+      }
       if (el.style) el.style.removeProperty('padding-right');
     }
   }
@@ -73,6 +94,7 @@
         } catch { /* ignore */ }
         el.remove();
         hit = true;
+        stats.removed += 1;
       }
     }
     // Always re-assert scroll: Reddit can re-lock the body without re-adding a sheet.
@@ -119,6 +141,7 @@
   let queued = false;
   function run() {
     queued = false;
+    stats.passes += 1;
     injectStyle();
     killNags();
   }

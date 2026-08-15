@@ -227,14 +227,54 @@
   // The half of the problem a user can actually feel: is the page frozen?
   function describeScrollLock() {
     const scroller = document.scrollingElement;
+    const height = scroller ? scroller.scrollHeight : 0;
     return {
       elements: [
         describeElement('html', document.documentElement),
         describeElement('body', document.body),
       ],
-      scrollable: !!scroller && scroller.scrollHeight - window.innerHeight > 4,
+      scrollable: !!scroller && height - window.innerHeight > 4,
+      // The numbers behind that boolean. `scrollable: true` says the content
+      // overflows; it does not say how far. "Will not scroll" on a page with
+      // 40px of travel is a different bug from the same words on a 12 000px
+      // thread, and `pan` cannot tell them apart either — a page can accept a
+      // drag and still have nowhere to go.
+      scroll: `y=${Math.round(window.scrollY || 0)} height=${height} viewport=${window.innerHeight}`,
       pan: describeTouchTarget(),
     };
+  }
+
+  // What the nag scripts have already done to this page. They keep a
+  // counts-only tally on a global in this same isolated world (every content
+  // script of one extension shares it). `pan` above says what refuses to move
+  // *now*; this says what got us here, which no capture of the page can show:
+  // the release runs on every mutation pass, so a page in a losing fight with a
+  // lock is cleared within a frame and, one frame later, looks exactly like a
+  // page that was never locked. Absent is a normal answer — on a host where
+  // neither script runs there is no tally at all.
+  function collectScriptState() {
+    const trail = globalThis.__keepScrolling;
+    if (!trail || typeof trail !== 'object') return null;
+    const state = {};
+    for (const site of Object.keys(trail)) {
+      const stats = trail[site];
+      if (!stats || typeof stats !== 'object') continue;
+      // Copied field by field rather than passed through: the two scripts count
+      // different things (Reddit removes nodes, X hides them), and whatever
+      // crosses the port has to be plain data.
+      const counts = {};
+      for (const key of Object.keys(stats)) {
+        if (typeof stats[key] === 'number' && key !== 'lastReleaseAt') counts[key] = stats[key];
+      }
+      state[site] = {
+        counts,
+        shapes: stats.shapes,
+        // Age, not a wall-clock time: a release 30 ms before the popup opened
+        // means the lock is still being re-applied right now.
+        sinceLastRelease: stats.lastReleaseAt ? Date.now() - stats.lastReleaseAt : null,
+      };
+    }
+    return Object.keys(state).length ? state : null;
   }
 
   function collectSignatures() {
@@ -337,6 +377,7 @@
         x: !!document.getElementById(SCRIPT_MARKERS.x),
       },
       lock: describeScrollLock(),
+      scriptState: collectScriptState(),
       signatures: collectSignatures(),
       overlays: collectOverlays(),
       components: collectComponents(),

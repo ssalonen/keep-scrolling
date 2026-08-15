@@ -319,6 +319,42 @@ test('X script stays reactive via MutationObserver', () => {
   assert.ok(scriptX.includes('MutationObserver'));
 });
 
+test('both nag scripts leave a counts-only tally the collector can report', () => {
+  // `lock.pan` says what refuses to move at the moment the popup opens. This is
+  // the other half: releaseScroll() runs on every pass, so a page losing a
+  // fight with a lock that keeps being re-applied is cleared within a frame and
+  // looks — one frame later, in the snapshot — like a page that was never
+  // locked. Those are opposite diagnoses and nothing in a capture separates
+  // them.
+  for (const [name, src] of [['reddit', script], ['x', scriptX]]) {
+    assert.ok(src.includes('globalThis.__keepScrolling'), `${name}: no tally for the reporter`);
+    assert.ok(/function noteRelease\(shape\)/.test(src), `${name}: releases must be counted by shape`);
+    assert.ok(/stats\.passes \+= 1;/.test(src), `${name}: passes must be counted`);
+    // A diagnostics counter must never be able to break the nag handling it
+    // counts — that separation is why the collector is its own script.
+    const note = src.match(/function noteRelease\(shape\) \{[\s\S]*?\n  \}/)[0];
+    assert.ok(!/document|querySelector|\.remove\(|setAttribute/.test(note), `${name}: the tally must touch nothing`);
+  }
+  // Every branch of the X release path is counted, or the tally would report a
+  // quiet page while one shape of lock is being cleared over and over.
+  const release = scriptX.match(/function releaseScroll\(\) \{[\s\S]*?\n  \}/)[0];
+  assert.equal(
+    (release.match(/noteRelease\(/g) || []).length,
+    (release.match(/s\.(?:overflow|overflowY|overflowX|position|pointerEvents|touchAction) === /g) || []).length,
+    'each inline lock shape the X script clears must note the release',
+  );
+  assert.ok(
+    /removeAttribute\(BASE_UI_LOCK_ATTR\);\s*\n\s*noteRelease\(/.test(scriptX),
+    'and so must the Base UI lock, which is the one that carries no inline overflow at all',
+  );
+
+  assert.ok(
+    scriptCollect.includes('globalThis.__keepScrolling'),
+    'the collector must read the tally — it is the whole point of keeping one',
+  );
+  assert.ok(scriptCollect.includes('scriptState: collectScriptState()'), 'and put it in the snapshot');
+});
+
 test('injectStyle() never throws when there is no document element yet', () => {
   // At document_start there may be nothing to append to. A throw there escapes
   // the first run() call and aborts the script BEFORE the MutationObserver is
@@ -699,10 +735,18 @@ test('the report names the build it came from and the state of the page', () => 
       scriptsActive: { reddit: false, x: true },
       lock: {
         scrollable: false,
+        scroll: 'y=0 height=4200 viewport=796',
         elements: [
           { element: 'html', present: true, class: '', style: '', computed: { overflow: 'visible' } },
           { element: 'body', present: true, class: '', style: 'position: fixed', computed: { position: 'fixed' } },
         ],
+      },
+      scriptState: {
+        x: {
+          counts: { passes: 132, hidden: 1, defused: 8, released: 14 },
+          shapes: { 'body:fixed': 14 },
+          sinceLastRelease: 30,
+        },
       },
       signatures: [{
         selector: '[data-interaction^="app-store-obstruction"]',
@@ -729,6 +773,20 @@ test('the report names the build it came from and the state of the page', () => 
   assert.ok(pageState.includes('"position": "fixed"'), 'the lock is flattened, not nested in "elements"');
   assert.ok(!pageState.includes('"elements"'), 'the collector’s wrapper keys are not worth URL budget');
   assert.ok(!pageState.includes('<div data-interaction'), 'samples do not belong in the kept block');
+
+  // The numbers behind `scrollable`, and what our own script has been doing.
+  // `pan` says what refuses to move now; fourteen releases of one lock shape,
+  // the last 30 ms before the popup opened, says the page is being re-locked
+  // as fast as we clear it — and that reads nowhere else in the report.
+  assert.ok(pageState.includes('height=4200'), 'the scroll geometry qualifies the boolean');
+  assert.ok(
+    pageState.includes('passes=132 hidden=1 defused=8 released=14 [body:fixed×14], last 30ms ago'),
+    'the script tally must reach the issue as one line per site',
+  );
+
+  // No tally (a host where neither script runs) must not leave a null in it.
+  const { pageState: quiet } = describeSnapshot({ lock: { scrollable: true } }, {});
+  assert.ok(!quiet.includes('scripts'), 'an absent tally is omitted, not reported as null');
 
   assert.ok(diagnostics.includes('data-vaul-drawer'), 'unrecognised overlays must reach the issue');
   assert.ok(diagnostics.includes('bottom-prompt'), 'preloaded component names must reach the issue');

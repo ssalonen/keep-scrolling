@@ -63,6 +63,29 @@
   // shape again — see releaseBaseUiLock().
   const BASE_UI_LOCK_ATTR = 'data-base-ui-scroll-locked';
 
+  // --- A read-only tally for the bug reporter --------------------------------
+  // collect-report.js runs in this same isolated world and puts these counts in
+  // the issue. `lock.pan` says what refuses to pan at the moment the popup
+  // opens; this says what this script has been *doing* to get there, which no
+  // capture of the page can show: releaseScroll() runs on every pass, so a page
+  // losing a fight with a lock that keeps being re-applied is cleared within a
+  // frame and looks, one frame later, exactly like a page that was never
+  // locked. "Released a body:fixed lock 240 times, last one 16 ms ago" and
+  // "never released anything" are opposite diagnoses.
+  //
+  // Counts only — no page content, and nothing here sends anything anywhere.
+  // Kept to plain property writes so it cannot throw and take the nag handling
+  // with it; that separation is why the collector is its own script.
+  const trail = globalThis.__keepScrolling || (globalThis.__keepScrolling = {});
+  const stats = { passes: 0, hidden: 0, defused: 0, released: 0, shapes: {}, lastReleaseAt: 0 };
+  trail.x = stats;
+
+  function noteRelease(shape) {
+    stats.released += 1;
+    stats.shapes[shape] = (stats.shapes[shape] || 0) + 1;
+    stats.lastReleaseAt = Date.now();
+  }
+
   // --- Undo Base UI's scroll lock --------------------------------------------
   // Base UI (the popup library behind X's current logged-out prompts) locks in
   // one of two ways. On mobile Safari, where there is no scrollbar to
@@ -94,6 +117,7 @@
       }
     }
     html.removeAttribute(BASE_UI_LOCK_ATTR);
+    noteRelease('html:base-ui');
     if (offset > 0) {
       try { window.scrollTo(0, offset); } catch { /* ignore */ }
     }
@@ -107,16 +131,16 @@
     // overflow below would reset to 0.
     releaseBaseUiLock();
 
-    for (const el of [document.documentElement, document.body]) {
+    for (const [where, el] of [['html', document.documentElement], ['body', document.body]]) {
       if (!el || !el.style) continue;
       const s = el.style;
 
       // 1. The original lock: style="overflow: hidden".
-      if (s.overflow === 'hidden') s.overflow = '';
-      if (s.overflowY === 'hidden') s.overflowY = '';
+      if (s.overflow === 'hidden') { s.overflow = ''; noteRelease(`${where}:overflow`); }
+      if (s.overflowY === 'hidden') { s.overflowY = ''; noteRelease(`${where}:overflow-y`); }
       // Base UI's mobile path sets both axes. overflow-x on its own does not
       // freeze the page, but leaving it behind clips the layout sideways.
-      if (s.overflowX === 'hidden') s.overflowX = '';
+      if (s.overflowX === 'hidden') { s.overflowX = ''; noteRelease(`${where}:overflow-x`); }
 
       // 2. The `vaul` drawer lock. X shipped that library for a while and it
       //    pins the page with position:fixed !important plus top/left/right/
@@ -128,6 +152,7 @@
         for (const prop of ['position', 'top', 'left', 'right', 'width', 'height']) {
           s.removeProperty(prop);
         }
+        noteRelease(`${where}:fixed`);
         if (Number.isFinite(offset) && offset < 0) {
           try { window.scrollTo(0, -offset); } catch { /* ignore */ }
         }
@@ -141,8 +166,8 @@
       //    the shape issue #25 turned out to have (there, on the modal rather
       //    than on <body> — but if X ever moves it here, overflow-watching
       //    would miss it completely).
-      if (s.pointerEvents === 'none') s.pointerEvents = '';
-      if (s.touchAction === 'none') s.touchAction = '';
+      if (s.pointerEvents === 'none') { s.pointerEvents = ''; noteRelease(`${where}:pointer-events`); }
+      if (s.touchAction === 'none') { s.touchAction = ''; noteRelease(`${where}:touch-action`); }
       s.removeProperty('padding-right');
     }
   }
@@ -181,7 +206,7 @@
       // hiding just the anchor rather than guessing.
       const aside = a.closest('aside');
       const host = aside && getComputedStyle(aside).position === 'fixed' ? aside : a;
-      if (hide(host)) hit = true;
+      if (hide(host)) { hit = true; stats.hidden += 1; }
     }
 
     // The blocking "See this post in the app" modal is hidden by the injected
@@ -218,6 +243,7 @@
         if (val && val.includes(APP_STORE_MARKER)) {
           el.setAttribute(attr, stripAppStoreParam(val));
           hit = true;
+          stats.defused += 1;
         }
       }
     }
@@ -252,6 +278,7 @@
   let queued = false;
   function run() {
     queued = false;
+    stats.passes += 1;
     injectStyle();
     // hideNags() before defuseAppStoreLinks(): the marker it matches on is the
     // very param defuseAppStoreLinks() strips. The hide survives regardless —

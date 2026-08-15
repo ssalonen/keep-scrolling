@@ -226,7 +226,12 @@ so a bug in the reporter can never break browsing.
   never ran" (disabled, or not allowed on this site) look identical.
 - `lock` — `<html>`/`<body>` classes, inline styles, computed
   `overflow`/`position`/`touch-action`/`pointer-events`, and whether the page
-  can actually scroll. That is the half of the problem the user feels.
+  can actually scroll. That is the half of the problem the user feels. It also
+  carries the numbers behind that boolean (`y=… height=… viewport=…`), because
+  `scrollable: true` says the content overflows and not how far: "will not
+  scroll" on a page with 40 px of travel is a different bug from the same words
+  on a 12 000 px thread, and a page can accept a drag and still have nowhere to
+  go.
 - `lock.pan` — what is under the middle of the viewport, and the first element
   in its ancestor chain whose computed `touch-action` forbids a vertical drag.
   `scrollable` only compares document height to viewport height, and the two
@@ -234,6 +239,21 @@ so a bug in the reporter can never break browsing.
   reporting `scrollable: true`, `overflow: visible` and no lock on either
   element. The report was *complete* and every field in it said the page was
   fine. This is the field that names that element instead.
+- `scriptState` — a counts-only tally the two nag scripts keep on a global in
+  the extension's own isolated world (every content script of one extension
+  shares it): passes, nags hidden or removed, links defused, and **releases
+  broken down by shape** (`body:fixed`, `html:base-ui`, `html:overflow`, …)
+  with the age of the last one. Where `lock.pan` says what refuses to move
+  *now*, this says what the script has been doing to get there — the one thing
+  a capture of the page structurally cannot hold. `releaseScroll()` runs on
+  *every* mutation pass, so a page losing a fight with a lock that keeps being
+  re-applied is cleared within a frame and, one frame later, looks exactly like
+  a page that was never locked. "Released a `body:fixed` lock 240 times, last
+  one 16 ms ago" and "never released anything" are opposite diagnoses. The
+  tally is deliberately counts only — no page content — and is written with
+  plain property assignments so a diagnostics counter can never throw inside
+  the path it counts. The two scripts count different things (Reddit removes
+  nodes, X hides them), so the issue renders whatever each one recorded.
 - `signatures` — counts and one sanitized sample per known nag selector, from
   the union of both scripts' signature lists (over-matching is harmless here:
   nothing is removed). It also carries `[data-vaul-drawer]`, which neither
@@ -377,6 +397,14 @@ and be useless for bisecting a regression.
   the popup and the sheet filling in. If so, cut `OVERLAY_SCAN_LIMIT` or scan
   only `document.body`'s first few levels of children — the nags we know of are
   all shallow.
+- **The shared isolated world.** `scriptState` assumes every content script of
+  one extension shares a JS context per frame — true in Chrome, and the
+  documented WebExtensions model, but not verified on a device for Safari. If
+  it does not hold there, the field simply reports absent, which is the same
+  answer as "neither nag script runs on this host": degraded, not broken. A
+  report that says the extension ran (`scriptsActive`) while carrying no tally
+  is the signature of that, and would mean moving the tally through the
+  background page instead.
 - **Overlay noise.** The scan reports what is pinned over the page, including
   X's cookie-consent banner. That is correct — it is read-only reporting, not
   removal — but a reader of an issue should not mistake the list for a list of
