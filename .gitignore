@@ -18,3 +18,8 @@ fastlane/test_output/
 fastlane/.env
 fastlane/.env.*
 !fastlane/.env.example
+
+# The scroll harness is dependency-free; playwright-core is only needed for its
+# optional --webkit mode, installed ad hoc and never committed.
+node_modules/
+package-lock.json

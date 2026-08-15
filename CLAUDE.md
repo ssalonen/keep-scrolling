@@ -43,6 +43,9 @@ the independent `extension/block-x-nag.js`. Full background and references:
   `Matchfile`. Signing + release live here, not in workflow bash.
 - `Gemfile` — pins fastlane.
 - `test/extension.test.js` — `node:test` invariant guards (no dependencies).
+  Run them with `node --test test/extension.test.js`, not a bare `node --test`:
+  Node treats every file under `test/` as a test file, so a bare run also
+  imports the browser harness.
 - `test/scroll/` — the touch-scroll harness: drives a real finger drag over CDP
   against one fixture per known freeze shape, asserting each is stuck WITHOUT
   the content script and pans WITH it. Also takes a bug report's URL or
@@ -56,13 +59,20 @@ the independent `extension/block-x-nag.js`. Full background and references:
 
 ## Build / release / test
 - **CI** (`ci.yml`): on every push/PR, syntax-checks the extension scripts,
-  parses the JSON resources, and runs `node --test`. A second job runs the
+  parses the JSON resources, and runs `node --test test/extension.test.js`. A second job runs the
   touch-scroll harness (`node test/scroll/run.mjs`) — the invariant tests pin
   the shape of the code, only the harness answers whether a finger can move the
   page. It is deliberately *not* a dependency of the release: it needs a
   browser, and a runner without one should not block one. On a green push to
   `main`, computes the next semver from Conventional Commits and triggers a
   release.
+- IMPORTANT: "will not scroll" has two causes and the reporter must separate
+  them. One is a lock or a `touch-action` cover. The other is that there is
+  barely any page: issue #28 was 1.7 screens of content — post, three replies,
+  two `role="status"` placeholders that never resolved — fully released by the
+  extension, 590px of travel, and it still read as frozen. `lock.maxScroll` /
+  `lock.screens` are what tell those apart; `scrollable` is a boolean satisfied
+  by 4px and cannot.
 - IMPORTANT: to test **scrolling**, drive touch. `window.scrollBy()`,
   `scrollIntoView()`, wheel events and `Input.synthesizeScrollGesture` all
   ignore `touch-action`, so they pass happily against a page no finger can move
@@ -176,6 +186,14 @@ for why).
   `run()`. The param the latter strips is the marker the former matches on.
   The hide itself survives (it is recorded on the node, not re-derived each
   pass), but the order is what lets a freshly rendered nag be recognised.
+- IMPORTANT: hiding the banner makes X **escalate**. A matched pair of captures
+  (one post, one build, extension off then on) shows the `<aside>` banner and no
+  modal without us, and no banner plus a `touch-none`
+  `app-store-obstruction` modal with us. `use-may-obstruct` answers a suppressed
+  banner with the blocking variant, so the lock the script races is the
+  aggressive one. Hence `releaseScroll()` also runs on `touchstart`/`pointerdown`
+  (passive, capture): every other trigger is reactive to a mutation and can be a
+  frame late.
 - IMPORTANT: `releaseScroll()` runs on **every** pass, like Reddit's — it is
   no longer gated on "a nag was found this pass". That gate was the v0.6.x
   freeze: X locks the page from prompts carrying none of our markers, so the
@@ -273,6 +291,17 @@ snapshot", and iOS gives a user no way to do that. Full design:
   the link is stored extension-less; it sends **no CORS headers** and 404s
   `OPTIONS`, so the request must stay CORS-simple and needs `host_permissions`;
   and it is **heavily rate limited**, so every path degrades to the clipboard.
+- The popup can **measure** the scroll (`scrollTest()`) rather than relying on
+  the reader's description, **annotate** the extension's own edits
+  (`data-xnr-defused` carries the original href; `data-xnr-releases` /
+  `data-xnr-last-lock` tally undone locks), and **reload once with the scripts
+  paused** for a baseline capture. Those three exist because three reports in a
+  row read healthy while the page was frozen, and because the one artefact that
+  finally explained anything was a matched with/without pair.
+- IMPORTANT: `collect-report.js` is **read-only** for the DOM. Two
+  user-initiated exceptions, both from the popup and neither touching markup:
+  the scroll test (which restores the position it started from) and the
+  baseline reload.
 - IMPORTANT: `collect-report.js` is **read-only**. It is a third content script
   precisely so a diagnostics bug cannot take the nag removal down with it; the
   tests fail if `.remove()`, `setAttribute`, `classList`, `appendChild` or

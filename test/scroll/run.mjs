@@ -5,6 +5,16 @@
 //   node test/scroll/run.mjs                 the committed fixtures
 //   node test/scroll/run.mjs snapshot.html   a page from a bug report
 //   node test/scroll/run.mjs https://x.com/…/status/…   a live page
+//   node test/scroll/run.mjs https://x.com/…  --with-js  mirror it and run the
+//                                                        site's real bundle
+//   node test/scroll/run.mjs … --webkit                  also measure reachable
+//                                                        scroll in WebKit
+//
+// Plain URL mode blocks every request, so the site's own client code never
+// runs — enough for a server-rendered cover, not enough for a lock a site
+// applies from a React effect. --with-js mirrors the page and its whole module
+// graph to a temp directory, serves it from localhost, and lets it hydrate with
+// no internet reachable. See mirror.mjs for what that does and does not copy.
 //
 // Every case is run twice: once WITHOUT the content script, once WITH it. Both
 // halves are assertions. A frozen fixture that pans in the control is not
@@ -23,6 +33,8 @@ import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { findChrome } from './cdp.mjs';
 import { panTest } from './harness.mjs';
+import { mirror, serve } from './mirror.mjs';
+import { webkitAvailable, reachTest } from './webkit.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..', '..');
@@ -41,7 +53,7 @@ const PANNED = 50;
 
 function describe(r) {
   const bits = [
-    `scrollable=${r.scrollable}`,
+    `of ${r.maxScroll}px available (${r.screens} screens)`,
     `html.overflow-y=${r.htmlOverflowY}`,
     `body.overflow-y=${r.bodyOverflowY}`,
   ];
@@ -49,11 +61,25 @@ function describe(r) {
   return bits.join(', ');
 }
 
+// A page barely longer than the viewport cannot be panned far no matter what
+// the extension does, and "moved 40px" then looks like a failure. Issue #28 was
+// the reverse mistake made by a reader: 590px of scroll, every pixel of it
+// released, and it still felt frozen because that was the whole page.
+const NOT_MUCH_PAGE = 120;
+
 // A live or captured page keeps its stylesheets — without them the Tailwind
 // classes that carry `touch-action: none` are inert and the page pans happily,
 // so the fixture reproduces nothing. Everything else stays blocked.
-async function materialize(target) {
+async function materialize(target, withJs) {
   if (!/^https?:/.test(target)) return { url: pathToFileURL(resolve(target)).href, offline: true };
+
+  if (withJs) {
+    const dir = mkdtempSync(join(tmpdir(), 'keep-scrolling-mirror-'));
+    await mirror(target, dir, { log: (line) => console.log(`  ${line}`) });
+    const server = await serve(dir);
+    // settle: the site has to boot and mount before a drag means anything.
+    return { url: `${server.origin}/index.html`, allowOrigin: server.origin, settle: 6000, server };
+  }
 
   const dir = mkdtempSync(join(tmpdir(), 'keep-scrolling-page-'));
   const res = await fetch(target, { headers: { 'User-Agent': IPHONE_UA, 'Accept-Language': 'en' } });
@@ -74,29 +100,76 @@ async function materialize(target) {
   return { url: pathToFileURL(file).href, offline: true };
 }
 
-async function runCase(name, target, expectControlStuck) {
-  const { url, offline } = await materialize(target);
-  const control = await panTest({ url, offline });
-  const fixed = await panTest({ url, offline, inject: CONTENT_SCRIPTS });
+// What a fixture is for. Naming the three outcomes beats a boolean, because the
+// third one is a real, correct result that used to be indistinguishable from a
+// failure — and mistaking it for one is how a reader ends up hunting a lock
+// that was never there (issue #28).
+const EXPECT = {
+  'plain.html': 'healthy',       // nothing wrong: must pan either way
+  'short-page.html': 'no-page',  // nothing locked, and almost nothing to scroll
+};
+const DEFAULT_EXPECT = 'frozen'; // stuck without the scripts, panning with them
+
+async function runCase(name, target, expect, withJs = false, webkit = false) {
+  let webkitLine = '';
+  const { url, offline, allowOrigin, settle, server } = await materialize(target, withJs);
+  const opts = { url, offline, allowOrigin, settle };
+  const control = await panTest(opts);
+  const fixed = await panTest({ ...opts, inject: CONTENT_SCRIPTS });
 
   const controlPanned = control.moved >= PANNED;
   const fixedPanned = fixed.moved >= PANNED;
+  const shortPage = fixed.maxScroll < NOT_MUCH_PAGE;
   const problems = [];
 
-  if (expectControlStuck === true && controlPanned) {
+  if (expect === 'frozen' && controlPanned) {
     problems.push(`the control panned ${control.moved}px — this fixture is not reproducing a freeze`);
   }
-  if (expectControlStuck === false && !controlPanned) {
+  if (expect === 'healthy' && !controlPanned) {
     problems.push(`the control did not pan (${control.moved}px) — the harness itself is broken`);
   }
-  if (!fixedPanned) {
-    problems.push(`WITH the content script the page still did not pan (${fixed.moved}px)`);
+  if (expect === 'no-page') {
+    // The whole point of this case: prove the page is short rather than locked.
+    if (!shortPage) problems.push(`expected a page with nothing to scroll, got ${fixed.maxScroll}px`);
+    if (fixed.blocker) problems.push(`something is refusing the drag: ${fixed.blocker.tag}`);
+  } else if (!fixedPanned) {
+    // Distinguish "still locked" from "there was nothing to scroll". Only the
+    // first is a bug in this extension.
+    problems.push(shortPage
+      ? `the page is only ${fixed.screens} screens long (${fixed.maxScroll}px of scroll) — `
+        + 'nothing is locked, there is just no page to move'
+      : `WITH the content script the page still did not pan (${fixed.moved}px `
+        + `of ${fixed.maxScroll}px available)`);
   }
+
+  // The engine iPhones run, where it is installed. It cannot swipe, but it can
+  // say whether the last screenful is reachable — and Safari and Chromium
+  // disagree about exactly the things that decide that.
+  if (webkit) {
+    const opts2 = { url, allowOrigin, settle, inject: CONTENT_SCRIPTS };
+    const r = await reachTest(opts2).catch((e) => ({ error: e.message.split('\n')[0] }));
+    if (r.error) problems.push(`WebKit run failed: ${r.error}`);
+    else {
+      webkitLine = `       webkit:  reached ${r.reached}px of ${r.maxScroll}px`
+        + (r.shortfall ? `, ${r.shortfall}px it will not give up` : '')
+        + (r.strandedCount ? `, ${r.strandedCount} element(s) stranded below the fold` : '');
+      if (r.stranded?.length) {
+        webkitLine += `\n       stranded: ${r.stranded.map((x) => `+${x.below}px "${x.text}"`).join(' | ')}`;
+      }
+      if (r.shortfall > 4 || r.strandedCount) {
+        problems.push('WebKit lays out content the reader cannot reach — '
+          + 'this is the "text at the bottom I cannot scroll into" shape');
+      }
+    }
+  }
+
+  if (server) server.close();   // after every engine has had the page, not before
 
   const verdict = problems.length ? 'FAIL' : 'ok  ';
   console.log(`${verdict} ${name}`);
   console.log(`       without: ${String(control.moved).padStart(4)}px  ${describe(control)}`);
   console.log(`       with:    ${String(fixed.moved).padStart(4)}px  ${describe(fixed)}`);
+  if (webkitLine) console.log(webkitLine);
   for (const problem of problems) console.log(`       ↳ ${problem}`);
   return problems.length === 0;
 }
@@ -107,20 +180,28 @@ async function main() {
     process.exit(77);
   }
 
-  const [target] = process.argv.slice(2);
+  const args = process.argv.slice(2);
+  const withJs = args.includes('--with-js');
+  const wantWebkit = args.includes('--webkit');
+  const webkit = wantWebkit && await webkitAvailable();
+  if (wantWebkit && !webkit) {
+    console.log('SKIP --webkit: install it with `npm i playwright-core && npx playwright install webkit`');
+    console.log('  (and `npx playwright install-deps webkit` — the download succeeds, then fails');
+    console.log('   validation on missing system libraries, which is the step people get stuck on)\n');
+  }
+  const [target] = args.filter((a) => !a.startsWith('--'));
   let results = [];
 
   if (target) {
     // A page from a bug report, or a live one. We do not know whether it is
     // stuck, so the control is reported but not asserted — reading it IS the
     // diagnosis.
-    console.log(`Panning ${target}\n`);
-    results.push(await runCase(target, target, null));
+    console.log(`Panning ${target}${withJs ? ' (mirrored, running its real JavaScript)' : ''}\n`);
+    results.push(await runCase(target, target, 'report', withJs, webkit));
   } else {
     const dir = join(HERE, 'fixtures');
     for (const file of readdirSync(dir).filter((f) => f.endsWith('.html')).sort()) {
-      // plain.html is the control fixture: it must pan either way.
-      results.push(await runCase(file, join(dir, file), file !== 'plain.html'));
+      results.push(await runCase(file, join(dir, file), EXPECT[file] || DEFAULT_EXPECT, false, webkit));
     }
   }
 
@@ -129,4 +210,9 @@ async function main() {
   process.exit(failed ? 1 : 0);
 }
 
-main().catch((err) => { console.error(err); process.exit(1); });
+// Only when run as a command — see mirror.mjs. Without this, `node --test`
+// drives a browser through every fixture as a side effect of discovering files.
+const RUN_DIRECTLY = !process.env.NODE_TEST_CONTEXT
+  && process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (RUN_DIRECTLY) main().catch((err) => { console.error(err); process.exit(1); });

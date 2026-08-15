@@ -24,9 +24,30 @@ frozen page.
 
 ```
 node test/scroll/run.mjs                            # committed fixtures
-node test/scroll/run.mjs https://x.com/…/status/…   # a live page
+node test/scroll/run.mjs https://x.com/…/status/…   # a live page, no JS
+node test/scroll/run.mjs https://x.com/…  --with-js # …running its real bundle
 node test/scroll/run.mjs snapshot.html              # a page from a bug report
 ```
+
+Reach for `--with-js` whenever the suspected lock is applied by the site at
+runtime rather than server-rendered: it mirrors the page's whole module graph,
+serves it from localhost and lets it hydrate offline. (A browser often cannot
+use an agent HTTPS_PROXY even when `curl` can — mirroring with Node's `fetch`
+sidesteps that entirely.)
+
+**The pan test drives Chromium; iPhones run WebKit.** Only Chromium can
+synthesize a trusted touch drag, so that half is Chromium-only. Add `--webkit`
+for the other half — how much scroll the document actually gives up, and whether
+anything is laid out below what the reader can reach. Reach for it whenever the
+complaint is *"there is text at the bottom I cannot scroll into"*: nothing is
+locked and the drag works, so only reachability explains it.
+
+If `--webkit` skips: the download succeeds and then fails validation on missing
+system libraries — `npx playwright install-deps webkit` (needs root/apt) is the
+fix, not a network problem.
+
+Say which engine a result came from, and treat an on-device check as the last
+word on any scrolling fix.
 
 Every case runs twice — without the content script and with it — and prints how
 far each panned plus the lock state and the element that blocked the drag. Needs
@@ -45,6 +66,14 @@ A green run means nothing on its own. Read **both** numbers:
   first (cookie state, A/B variant, a prompt that only appears after a delay).
 - **without: 0px / with: 0px** — still broken. The printed `blocked by …` line
   names the element; that is the selector to work from.
+
+And read the **distance available**, printed next to every number:
+
+- **with: 590px of 590px available (1.7 screens)** — the page is fully released
+  and *still* feels frozen to the reader, because that is the whole page. This
+  is issue #28: nothing to fix in the extension. Say so plainly rather than
+  hunting for a lock. `[role="status"]` counts in the bug report name the
+  unresolved placeholders the page ends on.
 
 ## Reproducing a report
 

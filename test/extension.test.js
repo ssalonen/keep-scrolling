@@ -19,6 +19,11 @@ const appHtml = readFileSync(join(root, 'app', 'Main.html'), 'utf8');
 const fastfile = readFileSync(join(root, 'fastlane', 'Fastfile'), 'utf8');
 const scrollHarness = readFileSync(join(root, 'test', 'scroll', 'harness.mjs'), 'utf8');
 const scrollRunner = readFileSync(join(root, 'test', 'scroll', 'run.mjs'), 'utf8');
+const scrollMirror = readFileSync(join(root, 'test', 'scroll', 'mirror.mjs'), 'utf8');
+const ci = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8');
+const security = readFileSync(join(root, '.github', 'workflows', 'security.yml'), 'utf8');
+const scrollWebkit = readFileSync(join(root, 'test', 'scroll', 'webkit.mjs'), 'utf8');
+const gitignore = readFileSync(join(root, '.gitignore'), 'utf8');
 // The page is one self-contained file; pull its inline script out for checks
 // that need the JS on its own.
 const appScript = (appHtml.match(/<script>([\s\S]*?)<\/script>/i) || [, ''])[1];
@@ -438,11 +443,101 @@ test('the collector runs on the same hosts as the nag scripts and only reads the
   for (const mutation of ['.remove()', 'setAttribute', 'classList', 'appendChild', 'innerHTML =']) {
     assert.ok(!code.includes(mutation), `collector must not mutate the page (found ${mutation})`);
   }
+  // Two side effects are allowed, both user-initiated from the popup and
+  // neither touching the DOM: the scroll test (which restores the position it
+  // started from) and the baseline reload. Nothing else may reach the page.
+  assert.ok(
+    /location\.reload/.test(code) && /pause-once/.test(code),
+    'the baseline reload is the only navigation the collector may cause',
+  );
 });
 
 test('reporter scripts are syntactically valid', () => {
   assert.doesNotThrow(() => new Function(scriptCollect));
   assert.doesNotThrow(() => new Function(scriptReport));
+});
+
+test('the X script releases the lock when a finger lands, not only on mutations', () => {
+  // Paired captures of one post showed X escalating when the banner is hidden:
+  // without the extension it renders the <aside> banner and the page scrolls;
+  // with it there is no banner and a touch-none app-store-obstruction modal
+  // instead. So the lock we race is the aggressive one, and a mutation-driven
+  // pass can be a frame late. Releasing on touchstart closes the window from
+  // the other end.
+  assert.ok(/addEventListener\('touchstart'|'touchstart',/.test(scriptX)
+    || /\['touchstart', 'pointerdown'\]/.test(scriptX), 'must release on touchstart');
+  assert.ok(
+    /passive: true/.test(scriptX),
+    'the listener must be passive — it must never be able to delay or cancel a scroll',
+  );
+});
+
+test('the collector measures the scroll instead of asking the reader to describe it', () => {
+  // Three reports in a row said "the page will not scroll" and arrived with
+  // every collected field saying the page was fine. The reader was right each
+  // time; a snapshot is a state and this is a behaviour.
+  assert.ok(/function scrollTest/.test(scriptCollect), 'scrollTest() must exist');
+  assert.ok(/function verdictFor/.test(scriptCollect),
+    'the report must say what the numbers mean, not leave them to be interpreted');
+  // It must put the page back: a diagnostic that leaves the reader somewhere
+  // else in the thread is its own bug report.
+  assert.ok(
+    /window\.scrollTo\(0, started\)/.test(scriptCollect),
+    'the scroll test must restore the original position',
+  );
+  // A programmatic scroll sails past touch-action, so the verdict has to lean
+  // on the pan probe for exactly that case.
+  assert.ok(/pan && pan\.blocked/.test(scriptCollect),
+    'the verdict must account for a cover that only a finger would hit');
+  assert.ok(/scrollTest: snapshot\.scrollTest/.test(scriptReport),
+    'the measurement must reach the issue body');
+  assert.ok(/id="scroll-test"/.test(reportHtml), 'the popup needs the button');
+});
+
+test('the extension annotates its own edits so a snapshot separates them', () => {
+  // A report is a snapshot taken AFTER the scripts ran, so without markers
+  // there is no way to tell our edits from the site's markup — which is why
+  // telling them apart took a second, extension-off capture and a whole
+  // debugging session.
+  assert.ok(/data-xnr-defused/.test(scriptX),
+    'a rewritten link must record what it was before');
+  assert.ok(
+    /if \(!el\.hasAttribute\(DEFUSED_ATTR\)\)/.test(scriptX),
+    'only the first rewrite is the original — a later pass must not overwrite it',
+  );
+  assert.ok(/function noteRelease/.test(scriptX), 'lock releases must be counted');
+  assert.ok(/data-xnr-releases/.test(scriptX) && /data-xnr-last-lock/.test(scriptX),
+    'the tally must be readable from the page');
+  assert.ok(/function describeEdits/.test(scriptCollect), 'the report must carry the tally');
+  assert.ok(/edits: snapshot\.edits/.test(scriptReport), 'the issue body must carry it too');
+});
+
+test('a one-shot pause lets the reader capture the same page untouched', () => {
+  // The paired capture is what showed X escalating from banner to blocking
+  // modal. Getting it must not require a trip to Settings.
+  for (const [name, src] of [['reddit', script], ['x', scriptX]]) {
+    assert.ok(
+      /sessionStorage\.getItem\('keep-scrolling:pause-once'\)/.test(src),
+      `${name} script must honour the pause flag`,
+    );
+    assert.ok(
+      /removeItem\('keep-scrolling:pause-once'\)/.test(src),
+      `${name} script must clear the flag immediately — a stuck flag would `
+        + 'silently disable the extension',
+    );
+  }
+  assert.ok(/id="baseline"/.test(reportHtml), 'the popup needs the button');
+});
+
+test('the collector can tell a flickering lock from no lock at all', () => {
+  // A lock applied and released repeatedly reads identically to a healthy page
+  // in a single sample, which is how three reports in a row arrived with every
+  // field saying the page was fine.
+  assert.ok(/function watchLock/.test(scriptCollect), 'watchLock() must exist');
+  assert.ok(/LOCK_SAMPLES/.test(scriptCollect) && /LOCK_GAP_MS/.test(scriptCollect),
+    'sampling must be over a window, not one reading');
+  assert.ok(/lockStates: snapshot\.lock\.states/.test(scriptReport),
+    'the issue body must carry how many distinct lock states were seen');
 });
 
 test('the collector reports whether a finger can pan, not just whether the document is tall', () => {
@@ -1317,6 +1412,85 @@ test('the scroll harness drives real touch, never a programmatic scroll', () => 
   assert.ok(/mobile: true/.test(scrollHarness), 'the viewport must be emulated as mobile');
 });
 
+test('WebKit is optional and never a hidden dependency of the harness', () => {
+  // The pan test drives Chromium because only Chromium can synthesize a trusted
+  // touch drag. WebKit answers the other half — what the reader can reach — and
+  // that half is engine-sensitive, so it is worth having and must stay optional:
+  // it is the one piece needing an npm install.
+  assert.ok(/await import\('playwright-core'\)/.test(scrollWebkit),
+    'playwright-core must be imported dynamically so its absence is not fatal');
+  assert.ok(/install-deps webkit/.test(scrollWebkit),
+    'record the step that actually blocks a WebKit install: the download succeeds, '
+    + 'then validation fails on missing system libraries');
+  assert.ok(/webkitAvailable/.test(scrollRunner) && /SKIP --webkit/.test(scrollRunner),
+    '--webkit must degrade to a clear skip, not an error');
+  assert.ok(/node_modules\//.test(gitignore), 'node_modules must never be committed');
+});
+
+test('CodeQL still covers everything that actually ships', () => {
+  // The scroll harness is scoped out because "download a page and write it to
+  // disk" is its purpose, not a defect. That is only defensible while the
+  // shipped code stays fully in scope — so pin it.
+  const config = readFileSync(join(root, '.github', 'codeql-config.yml'), 'utf8');
+  for (const shipped of ['extension', 'app']) {
+    assert.ok(
+      new RegExp(`^\\s*-\\s*${shipped}\\s*$`, 'm').test(config),
+      `${shipped}/ must stay in CodeQL scope — it is what runs on a user's phone`,
+    );
+  }
+  assert.ok(
+    /config-file: \.\/\.github\/codeql-config\.yml/.test(security),
+    'the workflow must actually use the config',
+  );
+  assert.ok(/security-extended/.test(security), 'keep the extended query set');
+});
+
+test('the harness does not run itself when node --test discovers it', () => {
+  // `node --test` treats every file under test/ as a test file and sets
+  // process.argv[1] to it, so the usual "was I run directly?" check is true
+  // there too — which made a bare `node --test` drive a browser through every
+  // fixture as a side effect, and fail on mirror.mjs printing its usage.
+  for (const [name, src] of [['run.mjs', scrollRunner], ['mirror.mjs', scrollMirror]]) {
+    assert.ok(
+      /!process\.env\.NODE_TEST_CONTEXT/.test(src),
+      `${name} must not execute under the test runner`,
+    );
+  }
+  assert.ok(
+    /node --test test\/extension\.test\.js/.test(ci),
+    'CI must scope the unit tests to the file that holds them',
+  );
+});
+
+test('every scroll fixture emulates a phone viewport', () => {
+  // Without <meta name="viewport"> Chrome lays a page out at 980px and scales
+  // it, so a 4000px fixture reported 2227px of scroll at a 796px viewport
+  // instead of 3204px. Real mobile pages ship the meta; the fixtures have to
+  // as well or every distance the harness prints is quietly wrong.
+  const dir = join(root, 'test', 'scroll', 'fixtures');
+  for (const name of readdirSync(dir).filter((f) => f.endsWith('.html'))) {
+    const html = readFileSync(join(dir, name), 'utf8');
+    assert.ok(
+      /<meta name="viewport" content="width=device-width/.test(html),
+      `${name} must declare a device-width viewport`,
+    );
+  }
+});
+
+test('scroll distance is reported, not just a scrollable boolean', () => {
+  // Issue #28: 590px of scroll, every pixel of it released by the extension,
+  // and the page still read as frozen because that was the whole page. A
+  // boolean cannot tell that from a lock; a distance can.
+  for (const [what, src] of [['harness', scrollHarness], ['collector', scriptCollect]]) {
+    assert.ok(/maxScroll/.test(src), `${what} must report how far the page can travel`);
+    assert.ok(/screens/.test(src), `${what} must report how much page there is`);
+  }
+  assert.ok(/maxScroll: snapshot\.lock\.maxScroll/.test(scriptReport),
+    'the issue body must carry the scroll distance');
+  assert.ok(/of \$\{r\.maxScroll\}px available/.test(scrollRunner),
+    'the harness output must show the distance panned against the distance available');
+});
+
 test('the scroll harness asserts the control, not just the fix', () => {
   // A freeze fixture that pans WITHOUT the content script is not reproducing
   // anything, and a fix measured against it has been measured wrong.
@@ -1327,6 +1501,13 @@ test('the scroll harness asserts the control, not just the fix', () => {
   assert.ok(
     /the harness itself is broken/.test(scrollRunner),
     'the plain fixture must fail the run if it stops panning',
+  );
+  // "still locked" and "there was never any page to move" are different
+  // findings; calling the second one a lock sends the next reader hunting for
+  // something that was never there.
+  assert.ok(
+    /nothing is locked, there is just no page to move/.test(scrollRunner),
+    'a short page must not be reported as a lock',
   );
   assert.ok(
     /process\.exit\(77\)/.test(scrollRunner),
@@ -1346,6 +1527,7 @@ test('every documented freeze shape has a scroll fixture', () => {
     'vaul-pinned.html',        // vaul's position:fixed pin
     'base-ui-mobile.html',     // Base UI, no-scrollbar path
     'base-ui-desktop.html',    // Base UI, scrollbar path
+    'short-page.html',         // issue #28: nothing locked, nothing to scroll
   ]) {
     assert.ok(fixtures.includes(required), `missing scroll fixture: ${required}`);
   }

@@ -229,6 +229,49 @@ Two things this does **not** establish, and neither should be claimed:
   are the strongest evidence in the snapshot and that mechanism fits them, but
   the runtime moment was never captured.
 
+## Hiding the banner makes X escalate (paired capture)
+
+The strongest evidence yet about what a reader actually hits, because for the
+first time it is a **matched pair**: one post (`matthen2/status/2082566186785480708`),
+one X build (`94396adc…`), captured twice — once with the extension disabled and
+once with it enabled.
+
+| | without the extension | with the extension |
+|---|---|---|
+| `<aside>` banner | **1** | **0** |
+| `[data-interaction^="app-store-obstruction"]` | **0** | **5** |
+| `touch-none` | 0 | **1** |
+| reader's experience | **scrolls** (banner visible) | **will not scroll** |
+
+X does not simply render one nag and let us hide it. Suppress the banner and
+`use-may-obstruct` reaches for the *blocking* modal instead — the
+`fixed inset-0 touch-none` one. So the lock the script races is not the mild
+variant it was written against; hiding the cheap nag provokes the expensive one.
+
+Two things follow, and both are implemented:
+
+- `releaseScroll()` also runs on `touchstart`/`pointerdown` (passive, capture).
+  Every other trigger is reactive to a mutation, which can be a frame late; the
+  moment a finger lands is the moment the release has to have happened.
+- The reporter samples the lock over a window rather than reading it once
+  (`watchLock()`), because a lock applied and released repeatedly is
+  indistinguishable from a healthy page in one reading — which is exactly what
+  three reports in a row looked like.
+
+**Still not reproduced end to end.** Both captures *replay* clean: rendered in
+WebKit and Chromium at 440×796, the with-extension DOM shows the modal at
+`display: none`, `touch-action: auto` under the finger, and all 1535px of scroll
+reachable. Fetching the same URL serves the modal variant rather than the banner
+variant, so the escalation itself cannot be driven locally yet. What is missing
+is a capture of the moment the page is stuck, which the lock sampling above is
+meant to provide.
+
+Ruled out along the way, so nobody re-runs it: the injected `<style>` lands as a
+child of `<html>` *before* `<head>` at `document_start` (there is no `<head>`
+yet), and both WebKit and Chromium apply it there — `display:none` on the modal
+takes effect, `sheet.cssRules` is populated. Stylesheet placement is not the
+bug.
+
 ## How it works
 - Matches the nag via `a[href*="launch_app_store=true"]` filtered by
   `isNagLink()` — the query param and X's own `ct=` surface name are

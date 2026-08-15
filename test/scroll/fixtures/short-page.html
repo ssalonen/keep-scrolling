@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="_shared.css"><title>nothing locked, nothing to scroll (issue #28)</title></head>
+<body>
+<!-- Issue #28's shape. Nothing is locked: no overflow, no touch-action, no
+     cover. The page is simply barely longer than the viewport, because the
+     content that should fill it never arrived — X ends a logged-out post page
+     with reply placeholders that stay placeholders. The reader flicks, the page
+     moves a little and stops, and reports that it will not scroll.
+
+     The extension cannot fix this and must not be blamed for it, so the harness
+     has to say "there is no page to move" rather than "still locked". -->
+<div style="height: 800px; padding: 16px">the post, and three replies</div>
+<div role="status" aria-label="Loading post" style="height: 40px" aria-hidden="true"></div>
+<div role="status" aria-label="Loading post" style="height: 40px" aria-hidden="true"></div>
+</body>
+</html>

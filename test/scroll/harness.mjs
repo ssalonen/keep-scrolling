@@ -26,6 +26,14 @@ import { launch, newPage } from './cdp.mjs';
 
 const VIEWPORT = { width: 440, height: 796 };
 
+// Origin equality, not a substring test: `http://127.0.0.1:8080` is a prefix of
+// `http://127.0.0.1:8080.example.com`, so startsWith() would let the live site
+// back into a run that is supposed to be sealed off from it.
+export function sameOrigin(url, origin) {
+  try { return new URL(url).origin === new URL(origin).origin; } catch { return false; }
+}
+
+
 async function evaluate(page, expression) {
   const { result, exceptionDetails } = await page.send('Runtime.evaluate', {
     expression,
@@ -49,6 +57,38 @@ async function drag(page, { from = 600, to = 100, step = 25, x = VIEWPORT.width 
   await page.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
 }
 
+// Content rendered below everything the reader can reach. A page can pan
+// perfectly and still strand its last screenful: scroll to the very bottom and
+// ask what is *still* below the fold. Anything there is laid out but
+// unreachable — "there is text at the bottom I cannot scroll into", which no
+// amount of lock-watching or pan-testing detects, because nothing is locked and
+// the drag works fine.
+export const REACH_PROBE = `(() => {
+  const startedAt = window.scrollY;
+  window.scrollTo(0, 1e7);
+  const reached = window.scrollY;
+  const de = document.scrollingElement;
+  const stranded = [];
+  for (const el of document.body.querySelectorAll('*')) {
+    if (!el.firstChild || el.children.length) continue;      // leaves carry the text
+    const text = (el.textContent || '').trim();
+    if (!text) continue;
+    const r = el.getBoundingClientRect();
+    if (r.height === 0 || r.top < window.innerHeight) continue;
+    stranded.push({ below: Math.round(r.top - window.innerHeight), text: text.slice(0, 80) });
+  }
+  stranded.sort((a, b) => a.below - b.below);
+  window.scrollTo(0, startedAt);
+  return {
+    maxScroll: Math.max(0, Math.round(de.scrollHeight - window.innerHeight)),
+    reached: Math.round(reached),
+    // Non-zero means the document claims more scroll than it will give up.
+    shortfall: Math.max(0, Math.round(de.scrollHeight - window.innerHeight - reached)),
+    strandedCount: stranded.length,
+    stranded: stranded.slice(0, 3),
+  };
+})()`;
+
 // What is under the reader's finger, and can it pan? Mirrors the `lock.pan`
 // probe the bug reporter collects, so a harness run and a filed report describe
 // the same page in the same words.
@@ -62,8 +102,14 @@ const PROBE = `(() => {
   }
   const html = getComputedStyle(document.documentElement);
   const body = getComputedStyle(document.body);
+  const height = document.scrollingElement.scrollHeight;
   return {
-    scrollable: document.scrollingElement.scrollHeight - innerHeight > 4,
+    scrollable: height - innerHeight > 4,
+    // How far the page COULD go. "panned 590px" is only good news next to it:
+    // issue #28 was a page with exactly 590px of scroll in it, fully released,
+    // that still read as frozen because that is all the page there was.
+    maxScroll: Math.max(0, Math.round(height - innerHeight)),
+    screens: Math.round((height / innerHeight) * 10) / 10,
     htmlOverflowY: html.overflowY, bodyOverflowY: body.overflowY,
     htmlPosition: html.position, bodyPosition: body.position,
     blocker,
@@ -74,12 +120,15 @@ const PROBE = `(() => {
  * Load a page and try to pan it with a real touch drag.
  *
  * @param {object}  opts
- * @param {string}  opts.url        page to load (file:// or http(s)://)
- * @param {string} [opts.inject]    content-script source to run at document_start
- * @param {boolean}[opts.offline]   block every request except the page itself
+ * @param {string}  opts.url          page to load (file:// or http(s)://)
+ * @param {string} [opts.inject]      content-script source to run at document_start
+ * @param {boolean}[opts.offline]     block every request except the page itself
+ * @param {string} [opts.allowOrigin] allow requests to this origin only, so a
+ *   mirrored copy can run the site's real JavaScript with no internet
+ * @param {number} [opts.settle]      ms to wait before dragging (hydration)
  * @returns {Promise<{moved:number, before:number, after:number, ...probe}>}
  */
-export async function panTest({ url, inject, offline = true }) {
+export async function panTest({ url, inject, offline = true, allowOrigin, settle = 400 }) {
   const browser = await launch(VIEWPORT);
   try {
     const page = await newPage(browser);
@@ -92,7 +141,18 @@ export async function panTest({ url, inject, offline = true }) {
     });
     await page.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
 
-    if (offline) {
+    if (allowOrigin) {
+      // Everything the mirrored copy needs is same-origin; anything else is the
+      // live site leaking back in, which would make the run non-reproducible.
+      // Blocklists cannot express "all but this one origin", so gate each
+      // request instead.
+      await page.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
+      page.on('Fetch.requestPaused', ({ requestId, request }) => {
+        const allowed = sameOrigin(request.url, allowOrigin) || request.url.startsWith('data:');
+        page.send(allowed ? 'Fetch.continueRequest' : 'Fetch.failRequest',
+          allowed ? { requestId } : { requestId, errorReason: 'BlockedByClient' }).catch(() => {});
+      });
+    } else if (offline) {
       await page.send('Network.enable');
       await page.send('Network.setBlockedURLs', { urls: ['http://*', 'https://*'] });
     }
@@ -103,8 +163,8 @@ export async function panTest({ url, inject, offline = true }) {
 
     const loaded = new Promise((resolve) => page.on('Page.loadEventFired', resolve));
     await page.send('Page.navigate', { url });
-    await Promise.race([loaded, new Promise((r) => setTimeout(r, 15000))]);
-    await new Promise((r) => setTimeout(r, 400));
+    await Promise.race([loaded, new Promise((r) => setTimeout(r, 30000))]);
+    await new Promise((r) => setTimeout(r, settle));
 
     const before = await evaluate(page, 'window.scrollY');
     await drag(page);

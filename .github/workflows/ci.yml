@@ -40,7 +40,7 @@ jobs:
           node -e "JSON.parse(require('fs').readFileSync('extension/build-info.json','utf8'))"
 
       - name: Run invariant tests
-        run: node --test
+        run: node --test test/extension.test.js
 
   # ── Can a finger actually pan the page? ────────────────────────────────────
   # The invariant tests above pin the shape of the code; they cannot tell you

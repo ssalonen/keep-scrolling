@@ -118,6 +118,57 @@ Four measured properties the code has to respect — none of them documented:
 The response is validated before it reaches the issue body: only a URL on the
 host that was posted to, with no whitespace, is accepted.
 
+## Measuring instead of describing
+
+Three reports in a row said *"the page will not scroll"* and arrived with every
+collected field saying the page was fine. The reader was right every time. A
+snapshot is a **state**; "it will not scroll" is a **behaviour**, and the two
+only meet by luck.
+
+So the popup has a **Test scrolling** button. It asks the collector to actually
+scroll the page, read the position back, put it where it was, and report how far
+it went, how far it could have, and what refused it — the same numbers
+`test/scroll/` prints, taken on the device, in WebKit, at the moment it is
+broken. `verdict` states the conclusion in words so the issue does not need
+interpreting: *the page refused to scroll at all*, *there is no page to scroll*,
+*something over the page refuses a vertical drag*.
+
+It is a button rather than something done on open, because it moves the page.
+And it is a *programmatic* scroll, which `touch-action` does not apply to the
+way it applies to a finger — so the verdict leans on `lock.pan` for exactly that
+case, which is the one issue #25 turned out to be.
+
+## Telling our edits from the site's
+
+A report is a snapshot taken **after** the nag scripts ran, which for a long
+time made "what did the extension change here?" unanswerable — separating the
+two took a second capture with the extension disabled and a whole debugging
+session. Three markers fix that from a single capture:
+
+- `data-xnr-hidden` — what was hidden (already there);
+- `data-xnr-defused` — a rewritten link, carrying **its original href**, so the
+  before is derivable from the after. Only the first rewrite is recorded; a
+  later pass over a re-rendered link must not overwrite it with our own output;
+- `data-xnr-releases` / `data-xnr-last-lock` on the injected `<style>` — how
+  many scroll locks were undone and what shape the last one was. A released lock
+  leaves exactly as little trace as a lock that never existed, so without a
+  tally "we fixed it" and "there was never anything there" are the same report.
+
+`edits` in the issue body carries all four counts.
+
+## The baseline, in one tap
+
+The most conclusive artefact this project has produced was a **matched pair** —
+one post, one build, captured with the extension off and on — because it showed
+X escalating from a banner to a blocking modal when the banner is hidden.
+Nothing in a single capture could have shown that.
+
+Getting the pair used to mean a trip to Settings and back. **Reload without the
+extension** sets a one-shot flag and reloads; both nag scripts check it at
+`document_start`, clear it immediately, and return without touching the page.
+The flag clearing itself is what keeps a forgotten flag from silently disabling
+the extension, and `sessionStorage` scopes it to that tab.
+
 ## What the user is asked
 Three checkboxes and a text box. The checkboxes (`SYMPTOMS` in `report.js`) are
 the three ways the extension actually fails — *the nag is still visible*, *the
@@ -227,6 +278,19 @@ so a bug in the reporter can never break browsing.
 - `lock` — `<html>`/`<body>` classes, inline styles, computed
   `overflow`/`position`/`touch-action`/`pointer-events`, and whether the page
   can actually scroll. That is the half of the problem the user feels.
+- `lock.maxScroll` / `lock.screens` — how far the page can travel, and how much
+  page there is. `scrollable` is a boolean satisfied by 4px, and issue #28 was a
+  page with 590px of scroll in it: the extension had released everything there
+  was to release, and the reader still reported that it would not scroll,
+  because 1.7 screens is what the whole page amounted to — the post, three
+  replies, and two `role="status"` placeholders that never filled in. "It is
+  locked" and "there is nothing to scroll to" are different bugs, in different
+  code, and a boolean cannot tell them apart.
+- `lock.states` / `lock.changed` — the lock sampled over ~half a second rather
+  than read once. A lock applied and released repeatedly reads exactly like a
+  healthy page in a single sample, and three reports in a row arrived that way:
+  every field fine, the page frozen. More than one state means something is
+  fighting for the scroll.
 - `lock.pan` — what is under the middle of the viewport, and the first element
   in its ancestor chain whose computed `touch-action` forbids a vertical drag.
   `scrollable` only compares document height to viewport height, and the two
