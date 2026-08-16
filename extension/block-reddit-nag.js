@@ -19,6 +19,20 @@
 (() => {
   'use strict';
 
+  // One-shot baseline capture. A bug report is far easier to act on next to the
+  // same page with the extension off — that pair is what finally showed X
+  // escalating from a banner to a blocking modal when the banner is hidden.
+  // Getting it used to mean a trip to Settings and back; the popup can instead
+  // set this flag, and the very next page load renders untouched so the reader
+  // can capture the "before". It clears itself immediately, so a forgotten flag
+  // cannot silently disable the extension.
+  try {
+    if (sessionStorage.getItem('keep-scrolling:pause-once') !== null) {
+      sessionStorage.removeItem('keep-scrolling:pause-once');
+      return;
+    }
+  } catch { /* storage unavailable (private mode, partitioned): just run */ }
+
   // --- What counts as a blocking nag (host elements we delete outright) ------
   const NAG_SELECTORS = [
     'rpl-bottom-sheet[blocking]',                 // the actual modal mechanism

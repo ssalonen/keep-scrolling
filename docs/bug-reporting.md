@@ -3,9 +3,10 @@
 ## Goal
 Let a user who hits a nag the extension misses file a GitHub issue **from the
 page it happened on**, with the diagnostic material that is otherwise
-impossible to get off an iPhone: the page URL, the shipped build version, the
-scroll-lock state, which nag signatures are still in the DOM, and a sanitized
-copy of the page HTML.
+impossible to get off an iPhone: which of the three known failures they saw,
+the page URL, the shipped build version, the scroll-lock state, which nag
+signatures are still in the DOM, what is pinned over the viewport, which
+components the page loaded, and a sanitized copy of the page HTML.
 
 Without this, every report is "it doesn't work on X" with no snapshot, and the
 maintenance loop both nag scripts are built around — *capture a fresh HTML
@@ -27,31 +28,241 @@ report.html ──▶ report.js ──(runtime message)──▶ collect-report.
                     └── tabs.create(github.com/…/issues/new?title=…&body=…)
 ```
 
-## Nothing is uploaded
-There is no API token, no POST, no third-party endpoint. The last step is
-opening GitHub's own new-issue form with `title` and `body` prefilled; the user
-reads the text and presses **Submit** themselves. The container app's "nothing
-leaves your device" claim survives intact — the user is the transport, and the
-one exception is spelled out on that screen.
+## What leaves the device, and what does not
+The issue is never filed on the user's behalf: the last step is opening
+GitHub's own new-issue form with `title` and `body` prefilled, and the user
+reads the text and presses **Submit** themselves. No token, no API call to
+GitHub.
 
-`test/extension.test.js` fails if `report.js` ever grows an `XMLHttpRequest`, a
-`POST`, a `sendBeacon`, an `Authorization` header, a second `fetch`, or any
-remote URL besides the issue form.
+**One thing is uploaded**, and this reverses an earlier rule that said nothing
+ever would. A GitHub issue body caps at 65 536 characters and cannot hold a
+page snapshot; a report without a snapshot cannot start the maintenance loop
+both nag scripts depend on. So the sanitized snapshot is POSTed to
+`https://paste.rs/` and the issue links to it.
+
+The trade is bounded deliberately:
+
+- it happens **only** on the file button, **only** with the *Upload it and link
+  from the issue* box ticked. Untick it and the old clipboard path is exactly
+  what happens instead;
+- the popup's preview — the consent step — shows a line saying the snapshot
+  *will be* uploaded, in the place the snapshot would occupy;
+- the checkbox names the service, says the link is readable by anyone who has
+  it, and says retention is not guaranteed;
+- the container app's privacy card says the same thing. All three must stay
+  truthful together.
+
+`test/extension.test.js` now pins the shape rather than forbidding the upload:
+exactly two `fetch` calls (the packaged `build-info.json` and the upload),
+exactly one `POST`, exactly two remote URLs (the issue form and the paste
+host), the endpoint as a single named constant matching `host_permissions`, and
+no `XMLHttpRequest`, `sendBeacon`, `Authorization` or `credentials:` anywhere.
+
+### The Safari permission prompt (found on device)
+The first real report filed from a device came back **with no snapshot link**,
+and the user saw "a prompt whether to allow the extension for this site, for a
+short moment" as the GitHub tab opened. Those are one bug:
+
+1. Safari does **not** grant `host_permissions` at install. The first
+   cross-origin request to paste.rs raises a per-site permission prompt.
+2. A Safari popup is dismissed as soon as it loses focus. The prompt takes
+   focus, so the popup — and the JavaScript context running the upload — is
+   destroyed while `fetch` is still in flight.
+3. The upload therefore never resolves, the issue opens with no link, and the
+   only trace is a prompt that flashed past on the way to GitHub.
+
+The fix is to stop letting the *fetch* raise that prompt:
+
+- the popup checks `permissions.contains()` on open and, when the grant is
+  missing, shows a **standalone "Allow paste.rs" button** with an explanation.
+  Losing the popup to the prompt then costs nothing — no report is in flight —
+  and the grant persists, so the next filing just works;
+- the file button still asks first if the grant is missing, and skips the
+  upload entirely when it is refused rather than firing a request that cannot
+  succeed;
+- both paths fall back to the clipboard, as before.
+
+Every branch is recorded **in the issue body** (`uploadOutcome`): *declined by
+the reporter*, *not allowed by Safari*, or *attempted but failed*. Without that
+line, a report with no link looks the same whichever happened, and the
+difference is the entire diagnosis — the reporter exists precisely because the
+person filing cannot be asked to diagnose it.
+
+`permissions.contains`/`request` are treated as optional: a host without the
+API answers `unknown`, and the code falls through to attempting the upload,
+which is exactly the behaviour that shipped in v0.8.0.
+
+### Why paste.rs, and what it demands of the code
+Chosen over the alternatives because it takes a raw `POST` body with no account
+and no API key (a key baked into a public client is a shared secret), returns
+the URL as plain text, and supports `DELETE`. GitHub Gist was the obvious
+"reputable" option and is unusable: anonymous gists were removed in 2018.
+
+Four measured properties the code has to respect — none of them documented:
+
+- **393 216 bytes (384 KiB) is the ceiling.** Past it the host answers `206`
+  and stores the paste **cut from the front** — the one cut that loses a
+  late-injected nag. So `trimToBytes()` middle-cuts to fit *before* posting,
+  measuring **bytes**: a snapshot is not ASCII and a character count overshoots.
+  A `206` is still reported as partial in the issue.
+- **`/<id>.html` renders the paste as HTML.** Linking that would serve a
+  captured page from the host's origin, so the returned URL has any extension
+  stripped and is linked plain.
+- **No `Access-Control-Allow-Origin`, and `OPTIONS` 404s.** The request must
+  stay CORS-simple (`Content-Type: text/plain`), and `host_permissions` is what
+  lets the popup read the response at all.
+- **"Pasting is heavily rate limited."** Failure is expected, so every path
+  falls back to the clipboard with a status message rather than losing the
+  report.
+
+The response is validated before it reaches the issue body: only a URL on the
+host that was posted to, with no whitespace, is accepted.
+
+## Measuring instead of describing
+
+Three reports in a row said *"the page will not scroll"* and arrived with every
+collected field saying the page was fine. The reader was right every time. A
+snapshot is a **state**; "it will not scroll" is a **behaviour**, and the two
+only meet by luck.
+
+So the popup has a **Test scrolling** button. It asks the collector to actually
+scroll the page, read the position back, put it where it was, and report how far
+it went, how far it could have, and what refused it — the same numbers
+`test/scroll/` prints, taken on the device, in WebKit, at the moment it is
+broken. `verdict` states the conclusion in words so the issue does not need
+interpreting: *the page refused to scroll at all*, *there is no page to scroll*,
+*something over the page refuses a vertical drag*.
+
+It is a button rather than something done on open, because it moves the page.
+And it is a *programmatic* scroll, which `touch-action` does not apply to the
+way it applies to a finger — so the verdict leans on `lock.pan` for exactly that
+case, which is the one issue #25 turned out to be.
+
+## Telling our edits from the site's
+
+A report is a snapshot taken **after** the nag scripts ran, which for a long
+time made "what did the extension change here?" unanswerable — separating the
+two took a second capture with the extension disabled and a whole debugging
+session. Three markers fix that from a single capture:
+
+- `data-xnr-hidden` — what was hidden (already there);
+- `data-xnr-defused` — a rewritten link, carrying **its original href**, so the
+  before is derivable from the after. Only the first rewrite is recorded; a
+  later pass over a re-rendered link must not overwrite it with our own output;
+- `data-xnr-releases` / `data-xnr-last-lock` on the injected `<style>` — how
+  many scroll locks were undone and what shape the last one was. A released lock
+  leaves exactly as little trace as a lock that never existed, so without a
+  tally "we fixed it" and "there was never anything there" are the same report.
+
+`edits` in the issue body carries all four counts.
+
+## The baseline, in one tap
+
+The most conclusive artefact this project has produced was a **matched pair** —
+one post, one build, captured with the extension off and on — because it showed
+X escalating from a banner to a blocking modal when the banner is hidden.
+Nothing in a single capture could have shown that.
+
+Getting the pair used to mean a trip to Settings and back. **Reload without the
+extension** sets a one-shot flag and reloads; both nag scripts check it at
+`document_start`, clear it immediately, and return without touching the page.
+The flag clearing itself is what keeps a forgotten flag from silently disabling
+the extension, and `sessionStorage` scopes it to that tab.
+
+## What the user is asked
+Three checkboxes and a text box. The checkboxes (`SYMPTOMS` in `report.js`) are
+the three ways the extension actually fails — *the nag is still visible*, *the
+page will not scroll*, *an overlay covers the whole page* — plus *something
+else*. They exist because the two halves come apart: a visible nag with a
+working page and a frozen page with nothing on it are different bugs in
+different code, and the third is the pair at once. A user who taps two boxes has
+filed something more useful than one who types nothing.
+
+Ticking a box also seeds the issue title, so a report about a frozen page does
+not arrive titled "nag not removed"; the title stops following the boxes as soon
+as the user edits it. The checkboxes are rendered from `SYMPTOMS` at runtime
+rather than written into `report.html`, so the label a user taps and the line
+the issue gets cannot drift apart — the test suite fails if a label is
+duplicated into the page.
 
 ## The URL budget
 GitHub answers an over-long request line with **414**, well before the ~8 KB
 most servers allow, so the prefilled URL is budgeted at `URL_BUDGET = 6000`
 characters (URL-encoded, which inflates HTML by up to 3×).
 
-`fitIssue()` shrinks the report until it fits, in a deliberate order:
+That budget holds roughly 2 000 characters of report, and the page HTML alone
+runs to six figures — so the URL was never going to be the transport for it.
+**The clipboard is.** `fitIssue()` drops whole sections until the rest fits, in
+increasing order of usefulness:
 
-1. the page-HTML block (the only unbounded part) is cut first;
-2. only if the text alone still overflows is the whole body clipped.
+1. the page HTML;
+2. the matched-signature markup (a subset of that same HTML);
+3. the overlay/component summary;
+4. the lock and signature counts;
+5. only then is the remaining text clipped.
 
-So the user's own words, the version, and the page state always survive. When
-anything was cut, the popup puts the **full** report on the clipboard, so it can
-be pasted into the issue after GitHub opens. The Copy button does the same on
-demand.
+Sections go **whole**, not nibbled down. Half a page snapshot is the top of
+`<head>` — link tags and meta, never the nag, which sits deep in `<body>`; it
+would spend the entire budget and still be undiagnosable. A JSON block cut
+mid-key is worse. What survives is a shorter but complete report.
+
+When the page HTML is dropped, the issue body says so **in place of it** and
+points at the clipboard, which the popup loads with the untruncated report
+whenever anything was cut. Without that line the issue reads like a finished
+report that merely lacks a snapshot, and nobody pastes anything. The Copy
+button does the same on demand.
+
+`describeSnapshot()` splits the page details into those tiers deliberately, and
+sizes the middle one to survive: the overlay list is trimmed to the three
+biggest covers with the opening tag capped at 160 characters, because a
+diagnostics block that gets dropped on every real page is the same as never
+having collected it. A test measures a realistic X-status-page report end to
+end and fails if the lock state or the overlay summary stops fitting.
+
+## The issue-body limit — what the fallback still has to handle
+With the upload in place the snapshot travels as a link, and the trimming below
+applies only when the user unticks the upload box or the host is unreachable.
+It is still the path a report takes on a bad day, so it stays exercised and
+tested.
+
+
+The clipboard is the transport, but it is **not** an unbounded one. GitHub
+rejects an issue body over **65 536 characters** outright:
+
+```
+Body can not be longer than 65536 characters
+```
+
+That is a server-side validation on the pasted text, so it applies no matter
+how the body arrives. The first version of this reporter budgeted the URL and
+treated the clipboard as unlimited, which produced a copy of up to 400 KB —
+one that could not be pasted at all. A snapshot that cannot be pasted is worth
+no more than one that was never captured.
+
+So `fitClipboard()` budgets the copy at `BODY_BUDGET = 65000`, and the popup
+shows and copies exactly that fitted text — the preview is what will paste.
+Both paths share one `shrink()`, differing only in what they measure: the
+prefilled link measures `issueUrl(...).length`, the clipboard measures the
+body's own length.
+
+### Why the page HTML is cut from the middle
+In the clipboard path the HTML is **trimmed, not dropped** — there is room for
+tens of thousands of characters of it — and the cut takes the **middle**,
+keeping both ends, because that is where the evidence is:
+
+- `<head>` holds the `modulepreload` names and injected stylesheets. Both
+  diagnoses in `docs/` started there (`logged-out-open-app-banner`, `vaul`).
+- the nags themselves are appended **late in `<body>`** — Reddit's blocking
+  sheet, X's app-store modal, X's drawer.
+
+A plain prefix keeps `<head>` and loses the nag, which is the whole report.
+The cut is marked in place so nobody reads the join as the page's real markup.
+
+`collect-report.js` clamps the same way (`clampDocument()`) when the document
+exceeds its own 400 000-character port cap — for exactly the same reason, one
+level up. A head-first `truncate()` there would throw away the end of `<body>`
+before `report.js` ever saw it, capping the snapshot to the one part of the
+document that never contains what is being reported.
 
 ## What the snapshot contains, and why
 `collect-report.js` is a third content script on the same hosts as the two nag
@@ -67,18 +278,74 @@ so a bug in the reporter can never break browsing.
 - `lock` — `<html>`/`<body>` classes, inline styles, computed
   `overflow`/`position`/`touch-action`/`pointer-events`, and whether the page
   can actually scroll. That is the half of the problem the user feels.
+- `lock.maxScroll` / `lock.screens` — how far the page can travel, and how much
+  page there is. `scrollable` is a boolean satisfied by 4px, and issue #28 was a
+  page with 590px of scroll in it: the extension had released everything there
+  was to release, and the reader still reported that it would not scroll,
+  because 1.7 screens is what the whole page amounted to — the post, three
+  replies, and two `role="status"` placeholders that never filled in. "It is
+  locked" and "there is nothing to scroll to" are different bugs, in different
+  code, and a boolean cannot tell them apart.
+- `lock.states` / `lock.changed` — the lock sampled over ~half a second rather
+  than read once. A lock applied and released repeatedly reads exactly like a
+  healthy page in a single sample, and three reports in a row arrived that way:
+  every field fine, the page frozen. More than one state means something is
+  fighting for the scroll.
+- `lock.pan` — what is under the middle of the viewport, and the first element
+  in its ancestor chain whose computed `touch-action` forbids a vertical drag.
+  `scrollable` only compares document height to viewport height, and the two
+  come apart: issue #25 was a full-screen `touch-action: none` cover over a page
+  reporting `scrollable: true`, `overflow: visible` and no lock on either
+  element. The report was *complete* and every field in it said the page was
+  fine. This is the field that names that element instead.
 - `signatures` — counts and one sanitized sample per known nag selector, from
   the union of both scripts' signature lists (over-matching is harmless here:
-  nothing is removed).
-- `html` — `documentElement.outerHTML`, sanitized and capped at 120 000 chars
-  before it crosses the message port.
+  nothing is removed). It also carries `[data-vaul-drawer]`, which neither
+  script removes — a page locked by a drawer we have no selector for is exactly
+  the case this reporter exists for — and `[data-base-ui-scroll-locked]`, the
+  marker the library X moved onto after `vaul` sets while its lock is in force.
+  That one names the lock itself, which no amount of `html`/`body` inline style
+  can reveal once the nag script has already cleared it. `[data-xnr-hidden]` is
+  in the list for the opposite reason: it says what the X script *did* match, so
+  "we never recognised it" and "we hid it and it is still on screen" stay
+  distinguishable in a report.
+- `overlays` — every **pinned element covering ≥10 % of the viewport**, biggest
+  first: its opening tag, computed `z-index`/`pointer-events`/`touch-action`,
+  and its visible text. Every nag either script has had to remove is that
+  shape, so this names an *unrecognised* one — turning "the whole page is
+  covered by something" into a selector someone can write. The scan touches
+  every element on the page, so it is capped (`OVERLAY_SCAN_LIMIT`) and runs
+  only when the popup asks.
+- `components` — the module names the page preloads, with the content hash
+  stripped (`logged-out-open-app-banner-D4f8Xq2b.js` → `logged-out-open-app-banner`).
+  Both diagnoses in `docs/` started here: that name identified X's banner, and
+  `vaul`'s stylesheet identified the scroll lock, before either was matched in
+  the DOM. A few hundred bytes, so they reach the issue even when the page HTML
+  cannot.
+- `html` — `documentElement.outerHTML`, sanitized and capped at 400 000 chars
+  before it crosses the message port. The cap is generous because the clipboard
+  carries this, not the URL, and a snapshot cut off inside `<head>` is not
+  something anyone can diagnose from.
 
 ## Redaction, and its limits
 `sanitizeHtml()` strips `<script>` / `<style>` / `<textarea>` bodies, redacts
 attributes whose *name* looks like a credential (`token`, `csrf`, `auth`,
-`session`, `secret`, `password`, `api key`), redacts `<meta content="…">` on a
-credential-named meta, blanks `<input value="…">`, and truncates long `data:`
-URIs.
+`session`, `secret`, `password`, `api key`, `nonce`), redacts the `content` of
+**every** `<meta>`, blanks `<input value="…">`, and truncates long `data:` URIs.
+
+### Why every `<meta>`, not just credential-shaped ones
+Redacting `<meta>` on a credential-shaped *name* only ever caught the honest
+cases — `csrf-token` announces itself. The head is also where a page parks its
+CSP nonce, its Sentry trace and baggage ids, request ids and build hashes,
+under names no pattern predicts, and a bug report carries them into a public
+issue. The exchange is free: `<meta>` content is of no use in diagnosing a nag,
+which lives in the `<body>` and is found by structure. So the default flipped —
+everything is redacted except a short allowlist (`viewport`, `charset`,
+`color-scheme`, `theme-color`, `referrer`, `robots`, `generator`) that describes
+how the page lays itself out and can hold nothing session-specific.
+
+The same reasoning added `nonce` to the credential names: a CSP nonce rides on
+the tags themselves, not only on a meta.
 
 It is **best-effort, not a security boundary**: the HTML of a logged-in session
 inevitably contains that session's content, and it can't be redacted away
@@ -100,6 +367,18 @@ exists to remove, and the tests cover both:
 - a quoted attribute value can contain `>` (`content="a > b"`), which ends a
   `[^>]*` run early and leaves the rest of the tag unredacted — so the `<meta>`
   and `<input>` passes walk attributes quote-aware.
+
+## Headless regression run
+The whole loop is DOM-only, so it can be driven in a desktop browser without a
+device: load a fixture page with the collector injected and a stub
+`runtime.onMessage`, ask it for a snapshot, then open `report.html` with a
+stubbed `browser.tabs` and click **Open GitHub issue**. That run is what caught
+the diagnostics block being silently dropped from every prefilled URL for being
+2.7 KB — the unit tests passed the whole time, because each part worked and only
+the sizes were wrong. Worth repeating after any change to the sections or the
+budget: assert the secrets in the fixture do not appear in the snapshot, and
+that the opened URL is under budget with the lock state and overlay summary
+still in it.
 
 ## Versioning
 `extension/build-info.json` carries placeholders (`0.0.0-dev`) in the repo and
@@ -157,7 +436,36 @@ and be useless for bisecting a regression.
   looks like that on device, and not like an empty sheet.
 - **Clipboard.** `navigator.clipboard.writeText` from an extension popup should
   work in a secure context under a user gesture; there is an
-  `execCommand('copy')` fallback, unverified on iOS.
+  `execCommand('copy')` fallback, unverified on iOS. This now carries more
+  weight than it used to: the page HTML reaches the issue **only** through the
+  clipboard. If it turns out not to work on iOS, the fallback worth trying is
+  a second tab with the snapshot in a `<textarea>` for the user to select.
 - **Budget realism.** 6000 was chosen with headroom, not measured against
   GitHub's actual ceiling. If prefilled links start 414ing, lower it; the
-  clipboard path is unaffected.
+  clipboard path is unaffected. The *body* limit, by contrast, is not a guess —
+  65 536 is GitHub's own error message, hit in practice on the first real
+  report filed with this reporter.
+- **Overlay scan cost.** `collectOverlays()` calls `getComputedStyle()` on up
+  to 8 000 elements. Measured only in a desktop headless run, where it is
+  imperceptible; on an older iPhone it may be a visible pause between opening
+  the popup and the sheet filling in. If so, cut `OVERLAY_SCAN_LIMIT` or scan
+  only `document.body`'s first few levels of children — the nags we know of are
+  all shallow.
+- **Overlay noise.** The scan reports what is pinned over the page, including
+  X's cookie-consent banner. That is correct — it is read-only reporting, not
+  removal — but a reader of an issue should not mistake the list for a list of
+  things to remove.
+- ~~**The upload has never run on a device.**~~ It has now, and it failed, in
+  the way described below. See "The Safari permission prompt".
+- **Retention is undocumented.** paste.rs states no expiry policy, so a link in
+  an old issue may or may not resolve months later. The issue text says as much
+  rather than implying permanence. If snapshots start disappearing before they
+  are acted on, the answer is to attach them to the issue instead — or to go
+  back to compressing them into the body (gzip+base64 measured at ~4.7× on
+  prose HTML, likely 6–10× on app markup, i.e. roughly 300–450 KB inside the
+  65 536-character limit).
+- **Third-party exposure.** The snapshot is sanitized best-effort, and a
+  logged-in page's HTML still contains that session's content. Uploading it
+  puts that on someone else's server, readable by anyone with the link, in
+  addition to the GitHub issue being public. That is the deliberate trade for
+  getting a whole snapshot; the checkbox is how a user declines it.

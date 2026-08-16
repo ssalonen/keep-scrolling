@@ -105,6 +105,25 @@
         margin-bottom: 12px;
         background: var(--bg-elevated);
         border-radius: var(--radius);
+        /* The symptom options are <label>s so the whole row is a tap target,
+           which means they would otherwise inherit the uppercase, dimmed
+           styling of the field labels above them. These are sentences. */
+        font-weight: 400;
+        text-transform: none;
+        letter-spacing: normal;
+        color: var(--text);
+    }
+
+    /* The symptom checkboxes read as one grouped list, so they sit tighter
+       than the standalone "include page HTML" option below them. */
+    #symptoms {
+        margin-bottom: 14px;
+    }
+
+    #symptoms .option {
+        margin-bottom: 6px;
+        padding: 11px 12px;
+        cursor: pointer;
     }
 
     .option input {
@@ -182,6 +201,16 @@
         filter: brightness(0.92);
     }
 
+    /* An action that sits inside an option card, not in the button row. */
+    button.inline {
+        flex: none;
+        margin-top: 8px;
+        padding: 8px 12px;
+        background: var(--accent);
+        color: #fff;
+        font-size: 13px;
+    }
+
     .status {
         margin: 10px 0 0;
         text-align: center;
@@ -198,16 +227,55 @@
     <label for="title">Title</label>
     <input type="text" id="title" autocapitalize="sentences" autocomplete="off">
 
-    <label for="description">What happened?</label>
+    <!-- Filled in from SYMPTOMS in report.js, so the label you tap and the line
+         the issue gets are the same string. -->
+    <div class="field">
+      <label id="scroll-test-label">Is the page stuck right now?</label>
+      <small>Measures it here, on this page, instead of describing it — the
+        result goes into the report.</small>
+      <button type="button" class="inline" id="scroll-test"
+              aria-describedby="scroll-test-label">Test scrolling</button>
+      <p class="status" id="scroll-test-result"></p>
+    </div>
+
+    <div class="field">
+      <label id="baseline-label">Compare with the extension off</label>
+      <small>Reloads this page once without Keep Scrolling, so you can file a
+        second report showing the same page untouched. The pair is what makes a
+        report conclusive.</small>
+      <button type="button" class="inline" id="baseline"
+              aria-describedby="baseline-label">Reload without the extension</button>
+    </div>
+
+    <label id="symptoms-label">What went wrong? Tick all that apply</label>
+    <div id="symptoms" role="group" aria-labelledby="symptoms-label"></div>
+
+    <label for="description">Anything else?</label>
     <textarea id="description" placeholder="e.g. the “See this post in the app” pop-up came back after scrolling, and the page froze."></textarea>
 
     <div class="option">
         <input type="checkbox" id="include-html" checked>
         <span>
             Include page HTML
-            <small>Scripts, styles and credential-shaped values are stripped, but the page’s own
-                content — including anything a logged-in session shows — is not. GitHub issues are
-                public: check the preview before filing.</small>
+            <small>The snapshot that makes a report fixable. Scripts, styles, meta values and
+                credential-shaped values are stripped, but the page’s own content — including
+                anything a logged-in session shows — is not. GitHub issues are public: check the
+                preview before filing.</small>
+        </span>
+    </div>
+
+    <div class="option">
+        <input type="checkbox" id="upload-html" checked>
+        <span>
+            Upload it and link from the issue
+            <small>A GitHub issue cannot hold a whole page, so the snapshot is uploaded to
+                <b>paste.rs</b> when you press Open GitHub issue, and the issue links to it.
+                Anyone with the link can read it and there is no guaranteed expiry. Untick to
+                keep it on your clipboard instead — then only part of it fits.</small>
+            <small id="upload-blocked" hidden>Safari has not allowed paste.rs yet. Tap below and
+                choose Allow — if this sheet closes when the prompt appears, just open it again;
+                the permission sticks.</small>
+            <button type="button" class="inline" id="allow-upload" hidden>Allow paste.rs</button>
         </span>
     </div>
 

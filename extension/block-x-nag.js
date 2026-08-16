@@ -1,82 +1,166 @@
 // block-x-nag.js
 // Safari Web Extension content script.
-// Removes X/Twitter's logged-out "Open X App" bottom banner (component
-// internally named "logged-out-open-app-banner") and restores scrolling on
-// mobile Safari.
+// Neutralizes X/Twitter's logged-out app-install nags — the "Open X App"
+// banner/pill and the blocking "See this post in the app" modal — and restores
+// scrolling on mobile Safari.
 //
 // Run at document_start. matches: *://*.x.com/*, *://*.twitter.com/*
 //
 // Design notes:
-//  - The nag is a fixed <aside> banner containing
-//    <a download href="...?launch_app_store=true...">Open X App</a>. The
-//    href query param + download attribute are purpose-built markers, not
-//    rotating hashes, so we match on those rather than the Tailwind utility
-//    classes wrapping the banner.
+//  - The nags are matched by X's own semantic markers, never by the Tailwind
+//    utility classes around them (cosmetic, retouch-prone): the
+//    `launch_app_store=true` query param plus the `ct=` surface name on the
+//    link, and `data-interaction="app-store-obstruction"` on the modal.
 //  - Deliberately does NOT match on <aside> alone or any generic
 //    role="region" selector — the page also renders an unrelated,
 //    legally-required cookie-consent banner
 //    (div[role="region"][aria-label="Cookie consent"]) that must never be
 //    touched.
-//  - The scroll lock is an *inline* style on <body> (no dedicated lock class
-//    like Reddit's), and it comes in two shapes: the original
-//    style="overflow:hidden", and — since X moved its logged-out prompts onto
-//    the `vaul` drawer library — style="position:fixed" with the scroll offset
-//    stashed in a negative `top`. releaseScroll() undoes both, and runs on
-//    every pass rather than only when a nag was matched: a lock we cannot
-//    attribute to a nag we recognise is exactly the case that leaves the page
-//    frozen with nothing on screen to explain it.
-//  - X also ships a *blocking* variant: a full-screen modal titled "See this
-//    post in the app" (role="dialog" aria-modal, `fixed inset-0 touch-none`)
-//    that covers the page and swallows touches, so the page cannot be scrolled
-//    even though the <aside> banner is gone. It carries no launch_app_store
-//    link at all — its marker is data-interaction="app-store-obstruction" on
-//    the dialog root (with -backdrop / -panel children). That attribute is
-//    X's own semantic name for the thing, so it is matched like the banner's
-//    markers: by purpose, not by the Tailwind classes around it.
+//  - Nags are HIDDEN, not removed. X now server-renders the blocking modal, so
+//    ripping it out of the DOM at document_start deletes a node React is about
+//    to hydrate against; the reply list comes back as permanent "Loading post"
+//    skeletons and the post page ends after three replies, which is what a
+//    reader experiences as "the page will not scroll". Marking the node with
+//    data-xnr-hidden and hiding it from our own stylesheet is invisible to
+//    React, leaves X's own dismiss/unlock path working, and cannot take
+//    surrounding content with it.
+//  - The scroll lock has never had a class of its own like Reddit's; it is a
+//    set of *inline* styles, and it has now had three shapes across three X
+//    builds (bare overflow:hidden, `vaul`'s position:fixed, Base UI's
+//    two paths). releaseScroll() undoes all of them and runs on every pass
+//    rather than only when a nag was matched: a lock we cannot attribute to a
+//    nag we recognise is exactly the case that leaves the page frozen with
+//    nothing on screen to explain it.
 //  - Separately, logged-out engagement controls (Reply/Repost/Like/Bookmark,
 //    and the whole-row tap target on a reply) are wired to
 //    "https://m.x.com/...?launch_app_store=true&ct=engagement_*" — tapping
-//    ANY of them, not just the banner, forces the app-install bounce. These
-//    links have no `download` attribute, so they're a separate mechanism
-//    from the banner and need their own handling: strip just the
-//    launch_app_store=true param (leaving the rest of the URL, e.g.
-//    ct=engagement_reply, intact) so the tap navigates normally instead of
-//    being redirected to the store.
+//    ANY of them, not just the banner, forces the app-install bounce. Those
+//    are controls the reader meant to tap, so they are never hidden: instead
+//    just the launch_app_store=true param is stripped (leaving the rest of the
+//    URL, e.g. ct=engagement_reply, intact) so the tap navigates normally.
 
 (() => {
   'use strict';
 
-  const APP_BANNER_LINK_SELECTOR = 'a[download][href*="launch_app_store=true"]';
-  const APP_BANNER_CSS_SELECTOR = `aside:has(${APP_BANNER_LINK_SELECTOR})`;
+  // One-shot baseline capture. A bug report is far easier to act on next to the
+  // same page with the extension off — that pair is what finally showed X
+  // escalating from a banner to a blocking modal when the banner is hidden.
+  // Getting it used to mean a trip to Settings and back; the popup can instead
+  // set this flag, and the very next page load renders untouched so the reader
+  // can capture the "before". It clears itself immediately, so a forgotten flag
+  // cannot silently disable the extension.
+  try {
+    if (sessionStorage.getItem('keep-scrolling:pause-once') !== null) {
+      sessionStorage.removeItem('keep-scrolling:pause-once');
+      return;
+    }
+  } catch { /* storage unavailable (private mode, partitioned): just run */ }
+
+  const APP_STORE_MARKER = 'launch_app_store=true';
+  const APP_STORE_LINK_SELECTOR = 'a[href*="launch_app_store=true"]';
   const APP_STORE_HREF_SELECTOR =
     '[href*="launch_app_store=true"], [data-href*="launch_app_store=true"]';
   // Prefix-matched so a renamed root (…-obstruction-dialog) is still caught,
-  // and so the -backdrop / -panel children are covered by the CSS backstop
-  // even if the root itself is ever restructured. Everything X names
-  // "app-store-obstruction" IS the app-install nag, so this cannot over-match
-  // the way a bare [role="dialog"] would (that would also catch the verified
-  // badge popover, the share menu, etc.).
+  // and so the -backdrop / -panel children (and a renamed root) stay covered by
+  // the CSS backstop. Everything X names "app-store-obstruction" IS the
+  // app-install nag, so this cannot over-match the way a bare [role="dialog"]
+  // would (that would also catch the verified badge popover, the share menu,
+  // etc.).
   const APP_OBSTRUCTION_SELECTOR = '[data-interaction^="app-store-obstruction"]';
+  // Our own mark. Hiding through a data attribute + our stylesheet (rather than
+  // an inline style) keeps the hide out of anything React manages, so a
+  // re-render does not undo it and does not fight us over the style attribute.
+  const HIDDEN_ATTR = 'data-xnr-hidden';
+  const HIDDEN_SELECTOR = '[data-xnr-hidden]';
+  // What a link looked like before defuseAppStoreLinks() rewrote it. A bug
+  // report is a snapshot of the page *after* this script ran, so without this
+  // there is no way to tell our edits from the site's own markup — which cost a
+  // full debugging session to work out by hand from a second, extension-off
+  // capture. Recording the original next to the rewrite makes the "before"
+  // derivable from the "after", from one capture.
+  const DEFUSED_ATTR = 'data-xnr-defused';
+  // Base UI's own marker for "this document is scroll-locked". X moved its
+  // logged-out prompts from `vaul` onto Base UI, whose lock is a different
+  // shape again — see releaseBaseUiLock().
+  const BASE_UI_LOCK_ATTR = 'data-base-ui-scroll-locked';
+
+  // --- Undo Base UI's scroll lock --------------------------------------------
+  // Base UI (the popup library behind X's current logged-out prompts) locks in
+  // one of two ways. On mobile Safari, where there is no scrollbar to
+  // compensate for, it just sets inline overflow-x/overflow-y:hidden — handled
+  // by releaseScroll() below. Otherwise it moves the scroll onto <body>:
+  // <html> gets scrollbar-gutter/overflow/scroll-behavior and this attribute,
+  // and <body> becomes a position:relative, 100dvh × 100vw, border-box box
+  // with the reader's offset parked in body.scrollTop. Clearing overflow alone
+  // leaves the body clamped to a single viewport — released, but still
+  // unscrollable — so the whole set has to come off together, and the offset
+  // has to be read back *before* it does.
+  function releaseBaseUiLock() {
+    const html = document.documentElement;
+    const body = document.body;
+    if (!html || !html.hasAttribute || !html.hasAttribute(BASE_UI_LOCK_ATTR)) return;
+
+    const offset = body ? body.scrollTop : 0;
+    if (body && body.style) {
+      for (const prop of [
+        'position', 'height', 'width', 'box-sizing',
+        'overflow-y', 'overflow-x', 'scroll-behavior',
+      ]) {
+        body.style.removeProperty(prop);
+      }
+    }
+    if (html.style) {
+      for (const prop of ['scrollbar-gutter', 'overflow-y', 'overflow-x', 'scroll-behavior']) {
+        html.style.removeProperty(prop);
+      }
+    }
+    html.removeAttribute(BASE_UI_LOCK_ATTR);
+    noteRelease('base-ui');
+    if (offset > 0) {
+      try { window.scrollTo(0, offset); } catch { /* ignore */ }
+    }
+  }
 
   // --- Release the page scroll (inline lock styles only) ---------------------
   // Only ever clears *inline* values, so a stylesheet-driven overflow rule
   // (i.e. the page's own layout) is left alone.
+  // How many locks this script has actually undone, and which shape the last
+  // one was. Recorded on our own <style> element — a node the page does not
+  // own, so this cannot disturb anything — because "did the extension do
+  // something here?" is otherwise unanswerable from a snapshot: a lock that was
+  // released leaves exactly as little trace as a lock that never existed.
+  let releases = 0;
+  function noteRelease(shape) {
+    releases += 1;
+    const style = document.getElementById('xnr-style');
+    if (!style) return;
+    style.setAttribute('data-xnr-releases', String(releases));
+    style.setAttribute('data-xnr-last-lock', shape);
+  }
+
   function releaseScroll() {
+    // First, because it reads back a scroll offset that clearing the inline
+    // overflow below would reset to 0.
+    releaseBaseUiLock();
+
     for (const el of [document.documentElement, document.body]) {
       if (!el || !el.style) continue;
       const s = el.style;
 
       // 1. The original lock: style="overflow: hidden".
-      if (s.overflow === 'hidden') s.overflow = '';
-      if (s.overflowY === 'hidden') s.overflowY = '';
+      if (s.overflow === 'hidden') { s.overflow = ''; noteRelease('inline-overflow'); }
+      if (s.overflowY === 'hidden') { s.overflowY = ''; noteRelease('inline-overflow-y'); }
+      // Base UI's mobile path sets both axes. overflow-x on its own does not
+      // freeze the page, but leaving it behind clips the layout sideways.
+      if (s.overflowX === 'hidden') s.overflowX = '';
 
-      // 2. The `vaul` drawer lock. X now ships that library (its stylesheet,
-      //    [data-vaul-drawer]{touch-action:none…}, is injected into logged-out
-      //    post pages) and it pins the page with position:fixed !important
-      //    plus top/left/right/height, keeping the scroll offset in a negative
-      //    `top`. Undo the whole set together and scroll back to where the
-      //    user was — dropping `position` on its own teleports them to the top.
+      // 2. The `vaul` drawer lock. X shipped that library for a while and it
+      //    pins the page with position:fixed !important plus top/left/right/
+      //    height, keeping the scroll offset in a negative `top`. Undo the
+      //    whole set together and scroll back to where the user was — dropping
+      //    `position` on its own teleports them to the top.
       if (s.position === 'fixed') {
+        noteRelease('vaul-pinned');
         const offset = parseInt(s.top, 10);
         for (const prop of ['position', 'top', 'left', 'right', 'width', 'height']) {
           s.removeProperty(prop);
@@ -88,48 +172,68 @@
 
       // 3. The blocking modal's lock also disables interaction with everything
       //    behind it via an inline pointer-events:none — clear only that exact
-      //    inline value, never a stylesheet-driven one.
-      if (s.pointerEvents === 'none') s.pointerEvents = '';
+      //    inline value, never a stylesheet-driven one. An inline
+      //    touch-action:none is the same idea aimed straight at panning: it
+      //    freezes the page with nothing to see in `overflow` at all, which is
+      //    the shape issue #25 turned out to have (there, on the modal rather
+      //    than on <body> — but if X ever moves it here, overflow-watching
+      //    would miss it completely).
+      if (s.pointerEvents === 'none') { s.pointerEvents = ''; noteRelease('inline-pointer-events'); }
+      if (s.touchAction === 'none') { s.touchAction = ''; noteRelease('inline-touch-action'); }
       s.removeProperty('padding-right');
     }
   }
 
-  // --- Remove any nag banners currently in the DOM ----------------------------
-  function killNags() {
+  // --- Is this app-store link a nag, or a control the reader tapped? ---------
+  // X tags every app-store link with a `ct` naming the surface it sits on.
+  // ct=engagement_* is an engagement control — Reply, Repost, Like, Bookmark,
+  // the whole-row tap target on a reply — which the reader went looking for and
+  // which must stay exactly where it is; those are handled by
+  // defuseAppStoreLinks() instead. Every other value is a standalone
+  // "get the app" affordance: ct=post-modal is the blocking modal's CTA,
+  // ct=post-timeline the bottom banner, and the top-bar "Open app" pill carries
+  // no ct at all.
+  function isNagLink(url) {
+    const ct = /[?&]ct=([^&#]*)/.exec(url || '');
+    return !ct || !ct[1].startsWith('engagement');
+  }
+
+  // --- Hide any nags currently in the DOM ------------------------------------
+  function hide(el) {
+    if (!el || !el.setAttribute || el.hasAttribute(HIDDEN_ATTR)) return false;
+    el.setAttribute(HIDDEN_ATTR, '');
+    return true;
+  }
+
+  function hideNags() {
     let hit = false;
     let anchors;
-    try { anchors = document.querySelectorAll(APP_BANNER_LINK_SELECTOR); } catch { anchors = []; }
+    try { anchors = document.querySelectorAll(APP_STORE_LINK_SELECTOR); } catch { anchors = []; }
     for (const a of anchors) {
+      if (!isNagLink(a.getAttribute('href'))) continue;
       // Only take the whole <aside> ancestor when it's actually the floating
       // banner (position: fixed, matching the observed markup) — an in-flow
       // <aside> could be something else entirely (e.g. a reply-list region
-      // whose pagination sentinel we'd delete along with it), so fall back to
-      // removing just the anchor rather than guessing.
+      // whose pagination sentinel we'd hide along with it), so fall back to
+      // hiding just the anchor rather than guessing.
       const aside = a.closest('aside');
       const host = aside && getComputedStyle(aside).position === 'fixed' ? aside : a;
-      host.remove();
-      hit = true;
+      if (hide(host)) hit = true;
     }
 
-    // The blocking "See this post in the app" modal. Removing the dialog root
-    // takes its backdrop and panel with it; the children are skipped by the
-    // isConnected check rather than removed twice.
-    let obstructions;
-    try { obstructions = document.querySelectorAll(APP_OBSTRUCTION_SELECTOR); } catch { obstructions = []; }
-    for (const el of obstructions) {
-      if (!el.isConnected) continue;
-      el.remove();
-      hit = true;
-    }
+    // The blocking "See this post in the app" modal is hidden by the injected
+    // stylesheet alone — see injectStyle(). It is server-rendered, so it is on
+    // screen before any script of ours runs and needs a rule that does not wait
+    // for a pass; and marking it here would gain nothing the rule does not
+    // already do.
 
     // Always re-assert scroll, like the Reddit script does. This used to be
     // gated on `hit`, on the theory that X reuses the inline overflow:hidden
     // idiom for legitimate modals we shouldn't fight. On-device that gate is
     // what breaks: X locks the page from prompts that carry none of the
-    // markers above (the vaul-drawer variant), so `hit` stays false and the
-    // page stays frozen with no nag on screen. A background that scrolls
-    // behind an open share sheet is a far cheaper failure than a page that
-    // cannot scroll at all.
+    // markers above, so `hit` stays false and the page stays frozen with no
+    // nag on screen. A background that scrolls behind an open share sheet is a
+    // far cheaper failure than a page that cannot scroll at all.
     releaseScroll();
     return hit;
   }
@@ -148,8 +252,11 @@
     for (const el of els) {
       for (const attr of ['href', 'data-href']) {
         const val = el.getAttribute(attr);
-        if (val && val.includes('launch_app_store=true')) {
+        if (val && val.includes(APP_STORE_MARKER)) {
           el.setAttribute(attr, stripAppStoreParam(val));
+          // Only the first rewrite is the original; a later pass over a
+          // re-rendered link must not overwrite it with our own output.
+          if (!el.hasAttribute(DEFUSED_ATTR)) el.setAttribute(DEFUSED_ATTR, val);
           hit = true;
         }
       }
@@ -170,11 +277,12 @@
     const style = document.createElement('style');
     style.id = 'xnr-style';
     style.textContent =
-      `${APP_BANNER_CSS_SELECTOR} { display: none !important; }\n` +
-      `body:has(${APP_BANNER_CSS_SELECTOR}) { overflow: auto !important; }\n` +
-      // Plain attribute match — no :has() — so the blocking modal is hidden
-      // (and stops swallowing touches) even on iOS below 16.4, before the
-      // observer gets a chance to remove it.
+      // What hideNags() marked. A plain attribute match — no :has() — so this
+      // works below iOS 16.4 too, unlike the aside:has(...) rule it replaced.
+      `${HIDDEN_SELECTOR} { display: none !important; }\n` +
+      // The blocking modal, hidden from the first paint. X server-renders it,
+      // so a rule is the only thing that can beat it to the screen; and since
+      // the rule stands on its own, the node itself is left for React.
       `${APP_OBSTRUCTION_SELECTOR} { display: none !important; }\n` +
       `body:has(${APP_OBSTRUCTION_SELECTOR}) { overflow: auto !important; }`;
     root.appendChild(style);
@@ -185,7 +293,11 @@
   function run() {
     queued = false;
     injectStyle();
-    killNags();
+    // hideNags() before defuseAppStoreLinks(): the marker it matches on is the
+    // very param defuseAppStoreLinks() strips. The hide survives regardless —
+    // it is recorded on the node, not re-derived from the href each pass — but
+    // the order is what lets a freshly rendered nag be recognised at all.
+    hideNags();
     defuseAppStoreLinks();
   }
   function schedule() {
@@ -213,5 +325,23 @@
   // Re-assert on load milestones.
   for (const ev of ['DOMContentLoaded', 'load']) {
     window.addEventListener(ev, schedule, { once: true });
+  }
+
+  // And at the one moment that actually matters: a finger landing on the page.
+  //
+  // Everything above is reactive to mutations, which leaves a window — X mounts
+  // a prompt, its library locks the page, and the lock stands until our next
+  // observer pass. Worse, hiding the banner makes X escalate to the *blocking*
+  // modal (paired captures of one post, with and without the extension, differ
+  // exactly there: `<aside>` banner and no modal without us, no banner and a
+  // touch-none `app-store-obstruction` modal with us), so the lock we race is
+  // the aggressive one.
+  //
+  // Releasing on touchstart closes that window from the other end: whatever
+  // happened since the last pass, the page is unlocked before the drag is
+  // interpreted. Passive, so this can never delay or cancel a scroll, and
+  // releaseScroll() is idempotent and touches only inline values.
+  for (const ev of ['touchstart', 'pointerdown']) {
+    window.addEventListener(ev, releaseScroll, { passive: true, capture: true });
   }
 })();

@@ -1,0 +1,7 @@
+/* Enough page to have somewhere to scroll to, and a target the drag lands on. */
+* { box-sizing: border-box; }
+body { margin: 0; font: 16px/1.5 system-ui, sans-serif; }
+.page { height: 4000px; background: linear-gradient(#e8f0fe, #fce8e6); padding: 16px; }
+/* X's own rule, verbatim from its shipped stylesheet. */
+.touch-none { touch-action: none; }
+.cover { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; }

@@ -43,13 +43,15 @@ test/extension.test.js     <- node:test invariant guards (no deps)
 ```
 
 ## manifest.json (MV3)
-The nag removal itself needs nothing but content scripts scoped by `matches` —
-no `host_permissions` block. The user just toggles the extension on for
-reddit.com in Safari settings.
+The nag removal itself needs nothing but content scripts scoped by `matches`.
+The user just toggles the extension on for reddit.com in Safari settings.
 
-The only permission requested is `activeTab`, and only for the bug reporter:
-the popup needs the current tab's id (and, when the collector is unreachable,
-its URL) to build a report. See `bug-reporting.md`.
+Both extra permissions exist only for the bug reporter (see
+`bug-reporting.md`): `activeTab`, so the popup can get the current tab's id
+(and, when the collector is unreachable, its URL); and a `host_permissions`
+entry for `https://paste.rs/`, so it can upload the page snapshot the issue
+links to — the one thing the extension ever sends anywhere, and only when the
+user ticks the box.
 
 ## Build & distribution (CI → TestFlight)
 This repo does **not** commit an Xcode project. `fastlane`'s `beta` lane

@@ -1,0 +1,23 @@
+# CodeQL scope for Keep Scrolling.
+#
+# The Security workflow's purpose has always been "guard the only code we ship"
+# — the two content scripts, the diagnostics collector, the popup and the
+# container-app page. Those are what land in the IPA and run on a stranger's
+# phone against a hostile page, and they are worth every query in
+# security-extended.
+#
+# `test/scroll/` is a developer harness. It never ships: `verify_ipa` asserts
+# what the appex contains, and it is `extension/` only. Left in scope it
+# produces findings that are not defects but its entire purpose — it downloads
+# a web page and writes it to disk, which `js/http-to-file-access` flags by
+# construction ("write to file system depends on untrusted data"). There is no
+# version of a page mirror that does not do that.
+#
+# This is a deliberate policy choice, not a way of clearing a red check: the one
+# alert in that file that WAS a defect — a time-of-check/time-of-use race
+# between statSync and readFileSync — is fixed in mirror.mjs rather than scoped
+# away, along with the path-traversal and request-forgery hardening around it.
+# If a future harness grows a genuine security surface, widen this again.
+paths:
+  - extension
+  - app

@@ -48,6 +48,15 @@ the independent `extension/block-x-nag.js`. Full background and references:
   `Matchfile`. Signing + release live here, not in workflow bash.
 - `Gemfile` — pins fastlane.
 - `test/extension.test.js` — `node:test` invariant guards (no dependencies).
+  Run them with `node --test test/extension.test.js`, not a bare `node --test`:
+  Node treats every file under `test/` as a test file, so a bare run also
+  imports the browser harness.
+- `test/scroll/` — the touch-scroll harness: drives a real finger drag over CDP
+  against one fixture per known freeze shape, asserting each is stuck WITHOUT
+  the content script and pans WITH it. Also takes a bug report's URL or
+  snapshot. No dependencies either — see `test/scroll/README.md`.
+- `.claude/skills/verify-scrolling/` — when to reach for that harness, and the
+  one rule it exists to enforce.
 - `docs/reddit-nag-remover-plan.md` — Reddit diagnosis, build steps, references.
 - `docs/x-nag-remover-plan.md` — X/Twitter diagnosis and caveats.
 - `docs/bug-reporting.md` — the in-Safari bug reporter: design, redaction, caveats.
@@ -55,8 +64,25 @@ the independent `extension/block-x-nag.js`. Full background and references:
 
 ## Build / release / test
 - **CI** (`ci.yml`): on every push/PR, syntax-checks the extension scripts,
-  parses the JSON resources, and runs `node --test`. On a green push to `main`, computes the next semver from
-  Conventional Commits and triggers a release.
+  parses the JSON resources, and runs `node --test test/extension.test.js`. A second job runs the
+  touch-scroll harness (`node test/scroll/run.mjs`) — the invariant tests pin
+  the shape of the code, only the harness answers whether a finger can move the
+  page. It is deliberately *not* a dependency of the release: it needs a
+  browser, and a runner without one should not block one. On a green push to
+  `main`, computes the next semver from Conventional Commits and triggers a
+  release.
+- IMPORTANT: "will not scroll" has two causes and the reporter must separate
+  them. One is a lock or a `touch-action` cover. The other is that there is
+  barely any page: issue #28 was 1.7 screens of content — post, three replies,
+  two `role="status"` placeholders that never resolved — fully released by the
+  extension, 590px of travel, and it still read as frozen. `lock.maxScroll` /
+  `lock.screens` are what tell those apart; `scrollable` is a boolean satisfied
+  by 4px and cannot.
+- IMPORTANT: to test **scrolling**, drive touch. `window.scrollBy()`,
+  `scrollIntoView()`, wheel events and `Input.synthesizeScrollGesture` all
+  ignore `touch-action`, so they pass happily against a page no finger can move
+  — which is what issue #25 was. `node test/scroll/run.mjs` does it properly;
+  reach for it via the `verify-scrolling` skill.
 - **Release** (`release.yml`): on a `v*` tag (or `workflow_call`), a macOS `build`
   job runs `bundle exec fastlane beta` — generate the Xcode project from
   `project.yml`, sync signing with `match`, archive/export a **signed App Store
@@ -132,9 +158,10 @@ host; the live variant is `-seo`, so its fog and scroll-lock pass through.
 ## X/Twitter nag (`extension/block-x-nag.js`)
 Removes X's logged-out "Open X App" bottom banner (an `<aside>` containing
 `a[download][href*="launch_app_store=true"]`, component internally named
-`logged-out-open-app-banner`), the blocking "See this post in the app" modal
-(`[data-interaction^="app-store-obstruction"]`), and releases the body's
-inline `overflow:hidden` scroll lock. This is an independent content script
+`logged-out-open-app-banner`), the top-bar "Open app" pill, and the blocking
+"See this post in the app" modal
+(`[data-interaction^="app-store-obstruction"]`), and releases the page's
+inline scroll lock. This is an independent content script
 scoped to `*://*.x.com/*` and `*://*.twitter.com/*` — it deliberately does
 **not** share code with the Reddit script (see `docs/x-nag-remover-plan.md`
 for why).
@@ -142,36 +169,82 @@ for why).
 - IMPORTANT: the **blocking** variant is a full-screen
   `div[role="dialog"][aria-modal]` with `fixed inset-0 … touch-none` that
   swallows every touch — the banner logic never saw it, which is why the nag
-  survived through v0.5.x. Match it only by `data-interaction` (X's own
+  survived through v0.5.x. `.touch-none{touch-action:none}` is how it actually
+  freezes the page, and that is **not a scroll lock**: `overflow` stays
+  `visible` on `<html>` and `<body>`, the document stays taller than the
+  viewport, and every field a bug report collects reads healthy while no finger
+  can move the page (issue #25). Measured with real touch events against the
+  live page: 0 px of vertical drag without the extension, 590 px with it. When
+  testing scroll, drive touch — `window.scrollBy()` ignores `touch-action` and
+  will pass against a frozen page. Match it only by `data-interaction` (X's own
   semantic name for it, prefix-matched so `-backdrop`/`-panel`/a renamed root
   are covered), NEVER by `role="dialog"`, `aria-modal` or `touch-none` — X
   uses that same shape for the share menu and other legitimate dialogs.
   `test/extension.test.js` guards this.
 
-- Match by the `download` + `launch_app_store=true` marker on the anchor,
-  then `.closest('aside')` to remove the whole banner — NOT by the
-  surrounding Tailwind utility classes (cosmetic, retouch-prone) and NOT by
-  bare `<aside>` or `role="region"` — the page also has an unrelated,
-  legally-required cookie-consent banner that must never be touched.
-- IMPORTANT: only remove the whole `<aside>` when `getComputedStyle(aside).
+- IMPORTANT: the script **hides** nags (`data-xnr-hidden` + a rule in its own
+  stylesheet); it does not remove them. X now **server-renders** the blocking
+  modal, so deleting it at `document_start` deletes a node React is about to
+  hydrate against — the reply list comes back as permanent "Loading post"
+  skeletons and the post page ends after three replies, which a reader
+  experiences as *the page will not scroll* (issue #25). Hiding is invisible to
+  React, leaves X's own dismiss/unlock path intact, and cannot take
+  surrounding content with it. A data attribute + stylesheet rather than an
+  inline style, so a re-render does not undo it.
+- IMPORTANT: do **not** require the `download` attribute. It was the banner's
+  marker up to v0.8.x and X has since dropped it from every app-store link —
+  `a[download][href*="launch_app_store=true"]` matched *nothing* on the shipped
+  page, so the banner and the top-bar pill went unhandled. The surviving marker
+  is `launch_app_store=true` plus X's own `ct=` surface name; `isNagLink()`
+  treats a link as a nag unless its `ct` starts with `engagement` (see the
+  engagement-controls note below). Known values: `ct=post-modal` (the blocking
+  modal's CTA), `ct=post-timeline` (the bottom banner), no `ct` at all (the
+  top-bar "Open app" pill).
+- Match by that marker, then `.closest('aside')` to hide the whole banner —
+  NOT by the surrounding Tailwind utility classes (cosmetic, retouch-prone)
+  and NOT by bare `<aside>` or `role="region"` — the page also has an
+  unrelated, legally-required cookie-consent banner that must never be touched.
+- IMPORTANT: only hide the whole `<aside>` when `getComputedStyle(aside).
   position === 'fixed'` (the banner's actual shape). An on-device test found
   that blindly removing any `<aside>` ancestor took out an in-flow reply-list
   region along with it, permanently stalling reply pagination — anchor-only
-  removal is the safe fallback when the ancestor isn't the floating banner.
+  hiding is the safe fallback when the ancestor isn't the floating banner.
+- IMPORTANT: `hideNags()` must run **before** `defuseAppStoreLinks()` in
+  `run()`. The param the latter strips is the marker the former matches on.
+  The hide itself survives (it is recorded on the node, not re-derived each
+  pass), but the order is what lets a freshly rendered nag be recognised.
+- IMPORTANT: hiding the banner makes X **escalate**. A matched pair of captures
+  (one post, one build, extension off then on) shows the `<aside>` banner and no
+  modal without us, and no banner plus a `touch-none`
+  `app-store-obstruction` modal with us. `use-may-obstruct` answers a suppressed
+  banner with the blocking variant, so the lock the script races is the
+  aggressive one. Hence `releaseScroll()` also runs on `touchstart`/`pointerdown`
+  (passive, capture): every other trigger is reactive to a mutation and can be a
+  frame late.
 - IMPORTANT: `releaseScroll()` runs on **every** pass, like Reddit's — it is
   no longer gated on "a nag was found this pass". That gate was the v0.6.x
   freeze: X locks the page from prompts carrying none of our markers, so the
   gate never opened and the page stayed frozen with nothing on screen to
   explain it. A background that scrolls behind an open share sheet is a far
   cheaper failure than a page that cannot scroll at all.
-- IMPORTANT: the lock has **two shapes** and both must be undone. The
-  original is inline `overflow:hidden` on `<body>`. The newer one comes from
-  `vaul`, the drawer library X now ships (its stylesheet,
-  `[data-vaul-drawer]{touch-action:none…}`, is injected into logged-out post
-  pages): `position:fixed !important` plus `top/left/right/height`, with the
-  scroll offset stashed in a negative `top`. Clear that whole set together
-  **and** `window.scrollTo` back to `-top` — dropping `position` alone
-  releases the scroll but teleports the reader to the top of the thread.
+- IMPORTANT: the lock has had **four shapes** across four X builds and all of
+  them must be undone. (1) inline `overflow:hidden` on `<body>`. (2) `vaul`,
+  the drawer library X shipped for a while: `position:fixed !important` plus
+  `top/left/right/height`, with the scroll offset stashed in a negative `top`
+  — clear that whole set together **and** `window.scrollTo` back to `-top`, as
+  dropping `position` alone releases the scroll but teleports the reader to the
+  top of the thread. (3) and (4) come from **Base UI**, the popup library X has
+  since moved its logged-out prompts onto (`useAnchoredPopupScrollLock`,
+  `usePopupHandleStore`, `useRenderElement` in the page's preloads): on mobile
+  Safari, where there is no scrollbar to compensate for, it just sets inline
+  `overflow-x`/`overflow-y: hidden`; otherwise it marks `<html>` with its own
+  `data-base-ui-scroll-locked` and moves the scroll onto `<body>` as a
+  `position:relative`, `100dvh`×`100vw`, `border-box` box with the reader's
+  offset parked in `body.scrollTop`. Clearing `overflow` alone leaves that body
+  clamped to a single viewport — released, and still unscrollable — so
+  `releaseBaseUiLock()` clears the whole set, and runs **first**, because it
+  has to read `body.scrollTop` back before the styles that make body scrollable
+  come off.
 - `releaseScroll()` only ever clears *inline* values (never computed ones), so
   a stylesheet-driven overflow rule — X's own layout — is left alone. It also
   clears an inline `pointer-events:none`, which is how the blocking modal
@@ -181,39 +254,81 @@ for why).
   first `run()` aborts the script *before* the `MutationObserver` is
   installed — silently disabling the extension for the whole page load. Both
   scripts bail out and retry on a later pass instead.
-- The injected CSS backstop uses `:has()` (iOS/Safari 16.4+); the JS
-  `killNags()` removal path via `MutationObserver` doesn't depend on it and
-  still works on older iOS, just without the early-hide race protection.
-- **Best-effort first pass**: derived from a single static HTML snapshot, not
-  yet verified on-device. If a variant slips through, capture a fresh
-  snapshot, confirm the anchor still has `download` + `launch_app_store=true`
-  (or find its new marker), and update `APP_BANNER_LINK_SELECTOR` — same
-  one-line-of-maintenance goal as Reddit's `NAG_SELECTORS`.
+- The injected CSS is what actually hides things now, and the two rules that
+  matter — `[data-xnr-hidden]` and `[data-interaction^="app-store-obstruction"]`
+  — are plain attribute selectors, so they work below iOS 16.4 too. Only the
+  `body:has(…) { overflow:auto }` unlock still needs `:has()` (16.4+), and
+  `releaseScroll()` covers the same ground without it.
+- **Maintenance loop**: if a variant slips through, capture a fresh snapshot,
+  find the anchor's current marker, and update `isNagLink()` /
+  `APP_STORE_LINK_SELECTOR` — same one-line-of-maintenance goal as Reddit's
+  `NAG_SELECTORS`. The current rules are verified against a live
+  server-rendered `x.com` status page, not on-device.
 - IMPORTANT: the app-install nag isn't only the `<aside>` banner. Every
   logged-out engagement control (Reply/Repost/Like/Bookmark, and a reply
   row's whole-row tap target) carries `launch_app_store=true` in its
-  `href`/`data-href` — X's own signal to bounce that tap to the App Store,
-  with no `download` attribute, so `killNags()` never touches it.
+  `href`/`data-href` — X's own signal to bounce that tap to the App Store.
+  These are controls the reader meant to tap, so `hideNags()` must never hide
+  them; `ct=engagement_*` is exactly what keeps `isNagLink()` off them.
   `defuseAppStoreLinks()` strips just that param (via `stripAppStoreParam()`)
   from any matching `href`/`data-href`, leaving the rest of the URL (e.g.
-  `ct=engagement_reply`) intact, and runs on every pass alongside
-  `killNags()`. **Unverified on-device** whether removing the param actually
-  suppresses the bounce — see `docs/x-nag-remover-plan.md`.
+  `ct=engagement_reply`) intact, and runs on every pass after `hideNags()`.
+  **Unverified on-device** whether removing the param actually suppresses the
+  bounce — and X now also preloads `redirect-to-app-store` and
+  `engagement-intercept-provider`, which suggests the bounce has a JS path the
+  param strip cannot reach. See `docs/x-nag-remover-plan.md`.
 
 ## Bug reporting (`extension/report.*`, `extension/collect-report.js`)
-A toolbar popup (Safari's **ᴀA** menu ▸ Keep Scrolling) lets a user describe a
-nag that got through and file it as a **prefilled GitHub issue** carrying the
-page URL, the shipped version, the scroll-lock state, which nag signatures are
-still in the DOM, and a sanitized copy of the page HTML. It exists because the
-maintenance loop for both scripts starts with "capture a fresh HTML snapshot",
-and iOS gives a user no way to do that. Full design: @docs/bug-reporting.md
+A toolbar popup (Safari's **ᴀA** menu ▸ Keep Scrolling) lets a user tick which
+of the known failures they saw, describe it, and file it as a **prefilled GitHub
+issue** carrying the page URL, the shipped version, the scroll-lock state, which
+nag signatures are still in the DOM, what is pinned over the viewport, which
+components the page preloaded, and a sanitized copy of the page HTML. It exists
+because the maintenance loop for both scripts starts with "capture a fresh HTML
+snapshot", and iOS gives a user no way to do that. Full design:
+@docs/bug-reporting.md
 
-- IMPORTANT: the extension **never uploads anything**. The final step is
-  `tabs.create()` on `github.com/…/issues/new?title=…&body=…`; the user reads
-  the text and submits it. No token, no POST, no endpoint — the container app's
-  privacy claim depends on this staying true, and `test/extension.test.js`
-  fails on `XMLHttpRequest`, `POST`, `sendBeacon`, `Authorization`, a second
-  `fetch`, or any remote URL other than the issue form.
+- IMPORTANT: the extension uploads **exactly one thing to exactly one place**:
+  the sanitized page snapshot, POSTed to `https://paste.rs/` (`SNAPSHOT_ENDPOINT`),
+  so the issue can link it. This reversed the older "never uploads anything"
+  rule on purpose — a GitHub issue body caps at 65 536 chars and cannot hold a
+  snapshot. It happens only from the file button, only with the upload box
+  ticked, and the preview discloses it first. The issue itself is still never
+  submitted for the user: `tabs.create()` on
+  `github.com/…/issues/new?title=…&body=…` and they press Submit.
+  `test/extension.test.js` pins the shape — two `fetch`es (packaged
+  `build-info.json` + the upload), one `POST`, two remote URLs, endpoint ==
+  `host_permissions`, and no `XMLHttpRequest`/`sendBeacon`/`Authorization`/
+  `credentials:`. Three places state the trade — the checkbox, the preview, and
+  `app/Main.html`'s privacy card — and a test fails if the app page goes back
+  to claiming nothing ever leaves.
+- IMPORTANT: Safari does **not** grant `host_permissions` at install, and its
+  popup is dismissed the moment anything takes focus. So a `fetch` that raises
+  the per-site prompt destroys the popup mid-upload — the v0.8.0 on-device
+  failure: a prompt flashed past on the way to GitHub and the issue arrived
+  with no snapshot link. The grant is therefore asked for on a **standalone
+  "Allow paste.rs" button** (losing the popup there costs nothing) and the file
+  button skips the upload when it is refused. Every no-link branch is recorded
+  in the issue as `uploadOutcome` — declined / not allowed / failed — because
+  otherwise the three are indistinguishable in a filed report.
+- IMPORTANT: paste.rs facts the code depends on, all measured rather than
+  documented: **393 216 bytes** is the ceiling and past it the host answers
+  `206` and keeps the paste **cut from the front** (so `trimToBytes()`
+  middle-cuts by BYTES before posting); **`/<id>.html` renders** the paste, so
+  the link is stored extension-less; it sends **no CORS headers** and 404s
+  `OPTIONS`, so the request must stay CORS-simple and needs `host_permissions`;
+  and it is **heavily rate limited**, so every path degrades to the clipboard.
+- The popup can **measure** the scroll (`scrollTest()`) rather than relying on
+  the reader's description, **annotate** the extension's own edits
+  (`data-xnr-defused` carries the original href; `data-xnr-releases` /
+  `data-xnr-last-lock` tally undone locks), and **reload once with the scripts
+  paused** for a baseline capture. Those three exist because three reports in a
+  row read healthy while the page was frozen, and because the one artefact that
+  finally explained anything was a matched with/without pair.
+- IMPORTANT: `collect-report.js` is **read-only** for the DOM. Two
+  user-initiated exceptions, both from the popup and neither touching markup:
+  the scroll test (which restores the position it started from) and the
+  baseline reload.
 - IMPORTANT: `collect-report.js` is **read-only**. It is a third content script
   precisely so a diagnostics bug cannot take the nag removal down with it; the
   tests fail if `.remove()`, `setAttribute`, `classList`, `appendChild` or
@@ -222,10 +337,42 @@ and iOS gives a user no way to do that. Full design: @docs/bug-reporting.md
   is the normal case. `scriptsActive` (are `#rnr-style` / `#xnr-style` present?)
   is what separates "clean page" from "the extension never ran" — if either
   script ever renames its injected `<style>` id, update `SCRIPT_MARKERS`.
-- GitHub 414s on a long request line, so `fitIssue()` trims to
-  `URL_BUDGET = 6000` chars, cutting the page-HTML block *before* the user's
-  text, and the popup puts the untruncated report on the clipboard whenever it
-  had to cut. Keep that order.
+- The popup leads with a **multi-select of the three known failures** (nag still
+  visible / page will not scroll / overlay covers the page, plus "something
+  else"), because those are different bugs in different code and a tapped box
+  beats an empty text field. `SYMPTOMS` in `report.js` is the single source: the
+  checkboxes are rendered from it, and the tests fail if a label is copied into
+  `report.html`. The first ticked box also seeds the issue title.
+- IMPORTANT: the page HTML does NOT fit the prefilled URL and never will —
+  `URL_BUDGET = 6000` holds ~2 000 chars of report. The **clipboard is the
+  transport** for it. `fitIssue()` therefore drops whole sections (HTML →
+  signature samples → overlays/components → lock state → clip the text), never
+  a fragment of one: half a snapshot is the top of `<head>`, which spends the
+  budget and diagnoses nothing. When the HTML is dropped, the body says so in
+  its place and points at the clipboard — without that line the issue reads as
+  complete and nobody pastes. Keep the order, and keep the note.
+- IMPORTANT: the clipboard is bounded too. GitHub rejects an issue body over
+  **65 536 characters** ("Body can not be longer than 65536 characters"), a
+  server-side check on the pasted text — shipping an untrimmed copy made the
+  paste fail outright. `fitClipboard()` budgets it at `BODY_BUDGET = 65000`,
+  and the preview shows exactly what will paste. Both paths share `shrink()`
+  and differ only in what they measure.
+- IMPORTANT: when the page HTML must be cut, cut the **middle** and keep both
+  ends (`trimMiddle()` in `report.js`, `clampDocument()` in
+  `collect-report.js`). `<head>` carries the preloads/stylesheets that named
+  both variants in `docs/`; the nags are appended late in `<body>`. A
+  head-first truncation keeps the one part of the document that never contains
+  the bug being reported — which is what the collector's cap originally did.
+- The overlay/component block is deliberately trimmed (`ISSUE_OVERLAYS`,
+  `ISSUE_TAG_LIMIT`) so it *survives* that trim on a real page — a diagnostics
+  block dropped from every issue is the same as not collecting it. A test sizes
+  a realistic X-status-page report end to end and fails if it stops fitting.
+- IMPORTANT: `sanitizeHtml()` redacts the `content` of **every** `<meta>`, not
+  just credential-named ones. The head is where a page parks its CSP nonce,
+  Sentry trace/baggage ids, request ids and build hashes, under names no pattern
+  predicts — and meta content diagnoses no nag, so the allowlist
+  (`viewport`, `charset`, …) is tiny on purpose. `nonce` is in the
+  credential-attribute pattern for the same reason.
 - `sanitizeHtml()` is best-effort redaction, not a security boundary: a
   logged-in page's HTML contains that session's content. The popup compensates
   by showing the exact text before anything is sent and making the HTML block a
