@@ -1,32 +1,39 @@
 # fastlane lanes for Keep Scrolling (iOS only).
 #
 # `beta` is the release lane (called by release.yml): generate the Xcode project
-# from the web extension, sync signing, build a signed IPA, verify it actually
-# ships the content scripts at the right bundle IDs and version, and upload to
+# from project.yml, sync signing, build a signed IPA, verify it actually ships
+# the content scripts at the right bundle IDs and version, and upload to
 # TestFlight. `build` does everything except the upload (local sanity check).
-# `certificates` seeds/syncs signing from a Mac.
+# `project` stops after generating, for opening in Xcode. `certificates`
+# seeds/syncs signing from a Mac.
 #
-# Unlike a normal iOS repo there is NO committed .xcodeproj: Apple's
-# safari-web-extension-converter generates the container app + extension appex
-# targets at build time from extension/. Everything the old release.yml did in
-# inline bash (convert, patch bundle IDs, pick a scheme, archive, package) lives
-# here instead, so `bundle exec fastlane build` reproduces CI on a Mac.
+# There is still NO committed .xcodeproj — it is generated into the repo root by
+# `xcodegen generate` and gitignored. What changed in v0.7.0 is *what generates
+# it*: Apple's safari-web-extension-converter used to invent the whole project
+# from extension/ on every run, and this file spent ~260 lines patching its
+# output back into shape. The native sources under native/ are now tracked, so
+# the generator has nothing to guess and this file has nothing to correct.
+# docs/FASTLANE-MIGRATION.md has the full before/after.
 
 default_platform(:ios)
 
-# Xcode-facing name: drives the generated project, scheme, target, .app and .ipa
+# Xcode-facing name: drives the project, scheme, target, .app and .ipa
 # filenames, so it deliberately has NO space — spaces there leak into every path
-# and shell invocation downstream for no benefit.
+# and shell invocation downstream for no benefit. Must match `name:` and the
+# app target in project.yml.
 APP_NAME = "KeepScrolling"
 # What users actually see (home screen, Settings, Safari's extension list). Set
-# as CFBundleDisplayName; independent of APP_NAME and of the bundle ID.
+# as CFBundleDisplayName in native/*/Info.plist; independent of APP_NAME and of
+# the bundle ID.
 APP_DISPLAY_NAME = "Keep Scrolling"
+# The appex target in project.yml. Also the Swift module name the appex's
+# NSExtensionPrincipalClass is qualified with.
+EXT_TARGET_NAME = "KeepScrollingExtension"
 # fi.mailhub.* matches the other apps under this Apple team (and the domain
 # actually owned), which matters because match's signing repo is per-team.
+# These must agree with PRODUCT_BUNDLE_IDENTIFIER in project.yml and with the
+# Matchfile; verify_ipa asserts them on the shipped artifact.
 APP_ID   = "fi.mailhub.keepscrolling"
-# The converter nests the appex under the container app. We *set* this suffix
-# explicitly rather than reading whatever the converter chose, so it can never
-# drift out of sync with the Matchfile (match must have a profile for it).
 EXT_ID   = "#{APP_ID}.Extension"
 
 # Repo root. fastlane runs lanes with its CWD set to the fastlane/ dir, so a
@@ -35,11 +42,20 @@ EXT_ID   = "#{APP_ID}.Extension"
 # locally, the parent of this Fastfile's directory.
 REPO_ROOT     = ENV["GITHUB_WORKSPACE"] || File.expand_path("..", __dir__)
 EXTENSION_DIR = File.join(REPO_ROOT, "extension")
-# Our container-app UI (feature overview + enable instructions), copied over the
-# placeholder page the converter generates. See apply_app_ui.
+# Our container-app UI (feature overview + enable instructions).
 APP_UI_DIR    = File.join(REPO_ROOT, "app")
 BUILD_DIR     = File.join(REPO_ROOT, "build")
-GEN_DIR       = File.join(BUILD_DIR, "gen")
+
+# Web resources are copied here and stamped with the build's version before
+# xcodegen runs, so a build never writes to a tracked file. That was the bug
+# that broke the reference repo (every-byte-counts): its generator wrote over
+# tracked .entitlements files, and the drift was invisible until release.
+STAGE_DIR           = File.join(BUILD_DIR, "staged")
+STAGED_EXTENSION_DIR = File.join(STAGE_DIR, "extension")
+STAGED_APP_DIR       = File.join(STAGE_DIR, "app")
+
+PROJECT_SPEC = File.join(REPO_ROOT, "project.yml")
+PROJECT_PATH = File.join(REPO_ROOT, "#{APP_NAME}.xcodeproj")
 
 # The files that are the actual product — verified present in the shipped IPA.
 CONTENT_SCRIPTS = ["block-reddit-nag.js", "block-x-nag.js"]
@@ -50,27 +66,17 @@ CONTENT_SCRIPTS = ["block-reddit-nag.js", "block-x-nag.js"]
 # sheet, which nothing else would catch.
 REPORT_FILES = ["report.html", "report.js", "collect-report.js"]
 
-# Written into the generated extension's Resources by apply_build_info and read
-# at runtime by report.js, so every filed bug names the build it came from.
-# NOT the same as manifest.json's "version": the converter reads that one on the
-# way to Info.plist (which generate_project then repoints at the build settings
-# anyway), and rewriting it post-conversion would leave the two disagreeing.
+# Stamped by stage_sources and read at runtime by report.js, so every filed bug
+# names the build it came from. NOT the same as manifest.json's "version", which
+# stays a placeholder — nothing reads it now that the Info.plists are tracked.
 BUILD_INFO_FILE = "build-info.json"
 
-# The container app's web resources. This filename is the template's, and it is
-# overwritten in place (never added) so the generated project's existing file
-# reference and Copy-Bundle-Resources phase keep working.
-#
-# Main.html ONLY, deliberately: app/Main.html inlines its own CSS, JS and icon.
-# The template ships no Script.js to overwrite, and it localizes the page into
-# Base.lproj/ while plain resources land at the .app root — so a page split
-# across sibling files could not reference them at runtime anyway.
-APP_UI_FILES = ["Main.html"]
-# Substituted into Main.html at build time; Script.js drops the element if this
-# ever survives into a build.
+# The container app's page, and the token stage_sources substitutes the build's
+# version into.
+APP_UI_MAIN = "Main.html"
 APP_UI_VERSION_TOKEN = "__APP_VERSION__"
-# A string that exists only in *our* page, not in the converter's placeholder —
-# how verify_ipa proves the real UI shipped.
+# A string that exists only in *our* page — how verify_ipa proves the real UI
+# shipped rather than an empty or stale file.
 APP_UI_MARKER = 'class="features"'
 
 platform :ios do
@@ -83,6 +89,14 @@ platform :ios do
     # find the newly generated certificate installed" (errSecInternalComponent).
     setup_ci(force: true)
     match(api_key: asc_api_key, type: "appstore", readonly: FastlaneCore::Helper.ci?)
+  end
+
+  desc "Stage web resources and generate the Xcode project (for opening in Xcode)"
+  lane :project do
+    # project.yml's `build/staged/…` source paths do not exist in a clean
+    # checkout, so a bare `xcodegen generate` fails. Use this instead.
+    generate_project(ENV["MARKETING_VERSION"] || "0.0.1", ENV["GITHUB_RUN_NUMBER"] || "1")
+    UI.success("Generated #{PROJECT_PATH} — open it with: xed #{PROJECT_PATH}")
   end
 
   desc "Build a signed IPA without uploading (local signing sanity check)"
@@ -116,8 +130,7 @@ def build_signed_ipa(key)
   marketing_version = ENV["MARKETING_VERSION"] || "0.0.1"
   build_number      = ENV["GITHUB_RUN_NUMBER"] || "1"
 
-  project, scheme, app_target, ext_target =
-    generate_project(marketing_version, build_number)
+  generate_project(marketing_version, build_number)
 
   # readonly by default. To regenerate profiles from CI after changing App-ID
   # capabilities (instead of re-seeding from a Mac), run the "Bump version and
@@ -126,15 +139,15 @@ def build_signed_ipa(key)
   # MATCH_REPO_KEY and an API key allowed to manage profiles.
   match(api_key: key, type: "appstore", readonly: ENV["MATCH_READONLY"] != "false")
 
-  # Stamp manual signing + the match profiles into the freshly generated
-  # project. The converter emits automatic signing with no team; overriding it
-  # per target here is what lets a team-less generated project build signed.
-  apply_signing(project, app_target, ENV.fetch("sigh_#{APP_ID}_appstore_profile-name"))
-  apply_signing(project, ext_target, ENV.fetch("sigh_#{EXT_ID}_appstore_profile-name"))
+  # Stamp manual signing + the match profiles onto each target. project.yml
+  # deliberately leaves signing unset so a local Debug build can use automatic
+  # signing with whatever team the developer has.
+  apply_signing(PROJECT_PATH, APP_NAME, ENV.fetch("sigh_#{APP_ID}_appstore_profile-name"))
+  apply_signing(PROJECT_PATH, EXT_TARGET_NAME, ENV.fetch("sigh_#{EXT_ID}_appstore_profile-name"))
 
   build_app(
-    project: project,
-    scheme: scheme,
+    project: PROJECT_PATH,
+    scheme: APP_NAME,
     configuration: "Release",
     clean: true,
     output_directory: BUILD_DIR,
@@ -163,441 +176,148 @@ def build_signed_ipa(key)
   ipa
 end
 
-# Run Apple's converter to produce the container app + extension appex targets,
-# then patch the generated project so it is fit to sign, version, and upload.
-# Returns [project_path, scheme, app_target_name, ext_target_name].
+# Stage the web resources, then generate the Xcode project from project.yml.
 #
-# The whole project is a build artifact under build/gen — it is regenerated from
-# scratch every run and never committed, so patching it here is safe (contrast
-# with a generator writing over a *tracked* file, which is what silently broke
-# every-byte-counts; see docs/FASTLANE-MIGRATION.md).
+# The project is a build artifact: regenerated from scratch every run and
+# gitignored, so nothing tracked is produced by a build and there is no
+# `git diff --exit-code` gate to keep honest.
 def generate_project(marketing_version, build_number)
-  require "xcodeproj"
+  stage_sources(marketing_version, build_number)
 
-  FileUtils.rm_rf(GEN_DIR)
-  FileUtils.mkdir_p(GEN_DIR)
+  FileUtils.rm_rf(PROJECT_PATH)
+  sh("xcodegen", "generate", "--spec", PROJECT_SPEC, "--project", REPO_ROOT, "--quiet")
+  UI.user_error!("xcodegen produced no project at #{PROJECT_PATH}") unless File.directory?(PROJECT_PATH)
 
-  sh(
-    "xcrun", "safari-web-extension-converter", EXTENSION_DIR,
-    "--ios-only",
-    "--project-location", GEN_DIR,
-    "--app-name", APP_NAME,
-    "--bundle-identifier", APP_ID,
-    "--no-open", "--no-prompt", "--force"
-  )
-
-  project_path = Dir.glob(File.join(GEN_DIR, "**", "*.xcodeproj")).min_by { |p| p.count(File::SEPARATOR) }
-  UI.user_error!("safari-web-extension-converter produced no .xcodeproj under #{GEN_DIR}") if project_path.nil?
-
-  # 0. Replace the converter's placeholder container-app page with ours before
-  #    anything else touches the project, so a failure here stops the build
-  #    early rather than after signing.
-  apply_app_ui(marketing_version, build_number)
-
-  # 0b. Re-enable the container app's scrolling (see enable_app_scrolling).
-  enable_app_scrolling
-
-  proj = Xcodeproj::Project.open(project_path)
-  app  = find_target(proj, "com.apple.product-type.application", "container app")
-  ext  = find_target(proj, "com.apple.product-type.app-extension", "Safari extension appex")
-
-  # 0c. Give the appex its own complete copy of extension/ under build/gen, and
-  #     find out where it actually takes its web resources from.
-  ext_resources = sync_extension_resources(proj, ext)
-
-  # 0d. Stamp the version the bug reporter quotes (see apply_build_info).
-  apply_build_info(ext_resources, marketing_version, build_number)
-
-  # 1. Bundle identifiers. The converter builds the container app's id from
-  #    --bundle-identifier's PREFIX plus --app-name, not from
-  #    --bundle-identifier itself: here that yields fi.mailhub.KeepScrolling
-  #    (capital K) against a real id of fi.mailhub.keepscrolling. That exact
-  #    class of case mismatch broke Xcode's case-sensitive
-  #    ValidateEmbeddedBinary check before (commit 8c1f2c9), and note that
-  #    lowercasing our own id does NOT avoid it — the converter still invents a
-  #    capitalised one. Forcing both ids here is what actually fixes it, and it
-  #    also guarantees they line up with the profiles match minted.
-  set_build_setting(app, "PRODUCT_BUNDLE_IDENTIFIER", APP_ID)
-  set_build_setting(ext, "PRODUCT_BUNDLE_IDENTIFIER", EXT_ID)
-
-  # 2. Versioning and display name. App Store Connect reads
-  #    CFBundleShortVersionString / CFBundleVersion from each Info.plist and
-  #    rejects a duplicate build number, so the tag version MUST reach the
-  #    binary. The converter writes the literal manifest.json version ("1.0")
-  #    into Info.plist, where an xcargs MARKETING_VERSION would be ignored —
-  #    repoint those keys at the build settings so the override actually lands.
-  #    CFBundleDisplayName is set here too, so the user-visible name is
-  #    independent of the space-free APP_NAME that drives the build paths.
-  [app, ext].each do |target|
-    set_build_setting(target, "MARKETING_VERSION", marketing_version)
-    set_build_setting(target, "CURRENT_PROJECT_VERSION", build_number)
-    # The converter emits GENERATE_INFOPLIST_FILE=YES *alongside* an
-    # INFOPLIST_FILE, which makes Xcode merge the INFOPLIST_KEY_* build settings
-    # over the file's contents. It also sets
-    # INFOPLIST_KEY_CFBundleDisplayName=<APP_NAME>, so the display name written
-    # into the file by patch_infoplist is silently overridden and the IPA ships
-    # "KeepScrolling" instead of "Keep Scrolling". Set the build setting too —
-    # it is the one that actually wins. (The version keys need no equivalent:
-    # they have no INFOPLIST_KEY_*, so the file's $(MARKETING_VERSION) /
-    # $(CURRENT_PROJECT_VERSION) resolve against the settings set just above.)
-    set_build_setting(target, "INFOPLIST_KEY_CFBundleDisplayName", APP_DISPLAY_NAME)
-    # Export compliance. Without this key App Store Connect holds every build
-    # behind a manual "does your app use encryption?" question before it can
-    # reach testers. Declaring it in the binary answers that up front, so a
-    # release needs no console babysitting. NO is the accurate answer here: the
-    # content script only manipulates the DOM — it performs no encryption, and
-    # the app makes no network calls of its own.
-    set_build_setting(target, "INFOPLIST_KEY_ITSAppUsesNonExemptEncryption", "NO")
-    patch_infoplist(proj, target)
-  end
-
-  proj.save
-
-  [project_path, pick_scheme(project_path), app.name, ext.name]
+  verify_project_shape
+  PROJECT_PATH
 end
 
-# Overwrite the container app's web resources with the ones in app/.
+# Copy extension/ and app/ into build/staged/ and stamp the build's version into
+# the two places that carry it.
 #
-# The container app is the icon on the home screen: the converter ships it as a
-# single line of placeholder text ("You can turn on … in Settings"), which is
-# the only thing a user ever sees of this app besides Safari's toggle. app/
-# replaces it with the feature overview + enable steps.
+# Staging exists so the version substitution never touches a tracked file: the
+# repo's build-info.json keeps its 0.0.0-dev placeholders and app/Main.html keeps
+# its raw __APP_VERSION__ token, which is exactly what an unstamped local build
+# should report.
 #
-# It overwrites the template's own filename in place instead of adding files,
-# so the generated project needs no modification: the file reference and the
-# Copy Bundle Resources phase the converter already emitted keep pointing at
-# exactly this path. Anything more (extra assets, renamed files) would have to
-# be registered with xcodeproj as well, and would silently ship missing
-# otherwise — which is why app/Main.html carries its CSS, JS and icon inline
-# rather than as siblings.
-def apply_app_ui(marketing_version, build_number)
-  # Resolve each file by globbing for its own name, never by deriving a shared
-  # directory: the converter localizes the page into Resources/Base.lproj/ while
-  # other resources sit in Resources/ above it, and it ships no Script.js at
-  # all. Assuming one directory held all three failed the v0.5.0 release, and
-  # assuming the template's file set matched ours failed v0.5.1.
-  dests = {}
-  APP_UI_FILES.each do |name|
-    src = File.join(APP_UI_DIR, name)
-    UI.user_error!("Missing container-app UI file: #{src}") unless File.exist?(src)
+# Both directories are copied wholesale and bundled wholesale (project.yml
+# references the staged directories, and xcodegen enumerates them at generate
+# time), so adding a file to extension/ or app/ needs no change here and no
+# manifest entry. Three releases died on the converter-era alternative:
+#
+#   v0.6.0 — the converter copied only what manifest.json pointed at, and
+#            build-info.json is named nowhere but in report.js's runtime.getURL.
+#   v0.6.1 — globbing build/gen for manifest.json ALSO found 0, on a file every
+#            shipped IPA demonstrably contains. The diagnosis: the converter
+#            keeps no copy of extension/ inside the generated project at all —
+#            the project *references* the tracked directory (directly, or via a
+#            symlinked Resources dir, which `Dir.glob "**"` does not descend
+#            into). No search under the generated tree could ever have matched.
+#
+# That second finding is why staging is not merely tidy. A generator that hands
+# back references into the working tree turns "stamp the version" into "rewrite
+# a tracked file", which dirties a dev machine's checkout and makes the build
+# non-reproducible. Copying first means the paths written below are ours by
+# construction — and stamp_target! refuses if that ever stops being true.
+def stage_sources(marketing_version, build_number)
+  require "json"
 
-    matches = Dir.glob(File.join(GEN_DIR, "**", name))
-    if matches.size == 1
-      dests[name] = matches.first
-    else
-      # Overwriting the template's own files in place is precisely what keeps
-      # them bundled, so there is no safe way to continue. List what the
-      # template does ship, so a template change is diagnosable from one failed
-      # run instead of one per release.
-      UI.user_error!(
-        "Expected exactly 1 #{name} in the generated project, found #{matches.size}: #{matches.inspect}. " \
-        "safari-web-extension-converter's app template changed — update apply_app_ui. Web resources " \
-        "it generated: #{Dir.glob(File.join(GEN_DIR, '**', '*.{html,css,js}')).inspect}"
-      )
-    end
+  FileUtils.rm_rf(STAGE_DIR)
+  stage_dir(EXTENSION_DIR, STAGED_EXTENSION_DIR, "extension")
+  stage_dir(APP_UI_DIR, STAGED_APP_DIR, "app")
+
+  # 1. The version the bug reporter quotes. Without it, every report from every
+  #    release would name the placeholder version and be useless for bisecting.
+  build_info = stamp_target!(File.join(STAGED_EXTENSION_DIR, BUILD_INFO_FILE))
+  unless File.exist?(build_info)
+    UI.user_error!("extension/#{BUILD_INFO_FILE} is missing — bug reports would not name a version")
   end
+  File.write(build_info, "#{JSON.pretty_generate('version' => marketing_version, 'build' => build_number)}\n")
 
-  dests.each { |name, dest| FileUtils.cp(File.join(APP_UI_DIR, name), dest) }
+  # 2. The version in the container app's footer. Substituted here, not written
+  #    into the HTML, because the version only exists as the git tag at build
+  #    time.
+  #
+  #    This rewrites EVERY occurrence of the token, so app/Main.html must
+  #    contain exactly one (the footer) — a second one, e.g. inside the inline
+  #    script, would be rewritten too and silently change behaviour. That is why
+  #    the page detects an unsubstituted footer by shape (/^Version\s/) rather
+  #    than by comparing against the token. test/extension.test.js enforces the
+  #    "exactly once" rule.
+  main_html = stamp_target!(File.join(STAGED_APP_DIR, APP_UI_MAIN))
+  UI.user_error!("Missing container-app UI file: app/#{APP_UI_MAIN}") unless File.exist?(main_html)
 
-  # Stamp the shipped version into the page footer. Done here, not in the HTML,
-  # because the version only exists as the git tag at build time.
-  main_html = dests.fetch("Main.html")
   contents = File.read(main_html)
   unless contents.include?(APP_UI_VERSION_TOKEN)
-    UI.user_error!("#{APP_UI_VERSION_TOKEN} is missing from app/Main.html — the built app would show no version")
+    UI.user_error!("#{APP_UI_VERSION_TOKEN} is missing from app/#{APP_UI_MAIN} — the built app would show no version")
   end
   File.write(main_html, contents.gsub(APP_UI_VERSION_TOKEN, "Version #{marketing_version} (#{build_number})"))
 
-  UI.message("Applied container-app UI from app/: #{dests.values.map { |p| p.sub("#{GEN_DIR}/", '') }.join(', ')}")
+  UI.message("Staged #{Dir.glob(File.join(STAGE_DIR, '*', '*')).size} web resources at #{marketing_version} (#{build_number})")
 end
 
-# Give the appex a private, complete copy of extension/ under build/gen, and
-# return the directory it now takes its web resources from.
+# Refuse to stamp a version through a path that resolves back into the tracked
+# tree, and return the path when it is safe to write.
 #
-# Two release failures came from guessing where those resources live:
-#
-#   v0.6.0 — apply_build_info globbed build/gen for build-info.json and found 0.
-#   v0.6.1 — the same glob for manifest.json also found 0, even though every
-#            shipped IPA demonstrably contains it.
-#
-# The second one is the diagnosis: the converter does not leave a copy of the
-# extension inside the generated project at all — the project *references*
-# extension/ (directly, or through a symlinked Resources directory, which
-# `Dir.glob "**"` does not descend into either). So nothing under build/gen was
-# ever going to match, and the fix is to stop searching the filesystem and ask
-# the project where the appex's resources actually come from.
-#
-# Once located, anything still pointing at the tracked extension/ is copied into
-# build/gen and the references are repointed at the copy. That is what makes
-# apply_build_info safe: stamping the version has to rewrite build-info.json,
-# and doing that through a reference to the tracked file would dirty the working
-# tree on a dev machine and make the build non-reproducible. It also lets the
-# copy carry files the converter never registered — build-info.json is named
-# nowhere but in report.js's `runtime.getURL`, so a per-file reference list
-# cannot include it.
-def sync_extension_resources(proj, ext)
-  sources = Dir.glob(File.join(EXTENSION_DIR, "*")).select { |p| File.file?(p) }.sort
-  UI.user_error!("No files in #{EXTENSION_DIR} — there is no extension to ship") if sources.empty?
+# Structurally this cannot happen: the callers build their paths from STAGE_DIR.
+# It is here because the failure it guards against is silent and expensive —
+# v0.6.1 established that a generated project can hand back references straight
+# into extension/, and a build that rewrites tracked files corrupts a dev
+# machine's checkout and stops being reproducible. Resolved with realpath so a
+# symlinked staging directory cannot smuggle the write back in; `Dir.glob "**"`
+# not descending into symlinks is exactly what hid the v0.6.1 layout.
+def stamp_target!(path)
+  resolved = File.realpath(File.dirname(path))
+  [EXTENSION_DIR, APP_UI_DIR].each do |tracked|
+    next unless resolved == File.realpath(tracked)
 
-  entries = ext.resources_build_phase.files.filter_map do |bf|
-    path = safe_real_path(bf.file_ref)
-    [bf.file_ref, path] unless path.nil?
-  end
-
-  res_dir = locate_extension_resources(entries)
-  if res_dir.nil?
     UI.user_error!(
-      "Could not find the web extension's resources in #{ext.name}: no reference in its Copy Bundle " \
-      "Resources phase is manifest.json or a directory containing it. " \
-      "safari-web-extension-converter's output layout changed — update sync_extension_resources. " \
-      "Registered resources: #{entries.map(&:last).inspect}. Generated tree: #{gen_tree.inspect}"
+      "Refusing to stamp #{path}: it resolves inside the tracked #{File.basename(tracked)}/. " \
+      "The version must only ever be written into the staged copies under #{STAGE_DIR}, or the " \
+      "build rewrites the working tree and stops being reproducible."
     )
   end
-
-  res_dir = privatise_extension_resources(res_dir, entries) unless inside_gen_dir?(res_dir)
-
-  # Whatever the converter did not register — a runtime-only file — is copied in
-  # and added to the build phase. Copying alone would not ship it: an
-  # unreferenced file is never bundled, the same trap apply_app_ui avoids by
-  # overwriting files the template already references.
-  added = sources.reject { |src| bundled?(entries, File.join(res_dir, File.basename(src))) }
-  added.each do |src|
-    dest = File.join(res_dir, File.basename(src))
-    FileUtils.cp(src, dest) unless File.exist?(dest)
-    register_resource(proj, ext, dest)
-  end
-
-  UI.message(
-    "#{ext.name} takes its web resources from #{res_dir.sub("#{GEN_DIR}/", 'build/gen/')}" +
-      (added.empty? ? "" : "; registered #{added.map { |p| File.basename(p) }.join(', ')}")
-  )
-  res_dir
+  path
 end
 
-# Where does this target's Copy Bundle Resources phase take the extension from?
-# Either a folder reference to a directory holding manifest.json, or a per-file
-# reference to manifest.json itself. Both shapes appear in the wild, and which
-# one the converter emits is not a contract.
-def locate_extension_resources(entries)
-  folder = entries.find { |(_, p)| File.directory?(p) && File.file?(File.join(p, "manifest.json")) }
-  return folder.last if folder
+# Copy one tracked directory's files into the staging area, failing loudly if it
+# is empty — an empty extension/ would otherwise produce a signed, correctly
+# versioned IPA that installs an extension with no code in it.
+def stage_dir(src, dest, label)
+  files = Dir.glob(File.join(src, "*")).select { |p| File.file?(p) }.sort
+  UI.user_error!("No files in #{label}/ — there is nothing to ship") if files.empty?
 
-  file = entries.find { |(_, p)| File.file?(p) && File.basename(p) == "manifest.json" }
-  file && File.dirname(file.last)
-end
-
-# Copy the referenced extension tree into build/gen and repoint every reference
-# that pointed into it. Resolves symlinks on the way in, so a symlinked
-# Resources directory becomes a real one we can write to.
-#
-# The generated project is a throwaway artifact built in place, so the repointed
-# references are absolute — no group-relative path to keep consistent.
-def privatise_extension_resources(res_dir, entries)
-  source = File.realpath(res_dir)
-  dest   = File.join(GEN_DIR, "ExtensionResources")
-  FileUtils.rm_rf(dest)
   FileUtils.mkdir_p(dest)
-  FileUtils.cp_r(File.join(source, "."), dest)
-
-  moved = 0
-  entries.each_with_index do |(ref, path), i|
-    real = File.realpath(path)
-    next unless real == source || real.start_with?("#{source}#{File::SEPARATOR}")
-
-    repointed = File.join(dest, real.sub(/\A#{Regexp.escape(source)}#{File::SEPARATOR}?/, ""))
-    ref.source_tree = "<absolute>"
-    ref.path = repointed
-    entries[i] = [ref, repointed]
-    moved += 1
-  end
-
-  UI.important(
-    "The generated project referenced #{source} — the tracked extension/ — rather than a copy of its " \
-    "own. Copied it to build/gen/ExtensionResources and repointed #{moved} reference(s), so stamping " \
-    "the build version cannot rewrite a tracked file."
-  )
-  dest
+  files.each { |f| FileUtils.cp(f, File.join(dest, File.basename(f))) }
 end
 
-def inside_gen_dir?(path)
-  real = File.realpath(path)
-  gen  = File.realpath(GEN_DIR)
-  real == gen || real.start_with?("#{gen}#{File::SEPARATOR}")
-rescue StandardError
-  false
-end
-
-# What the generated project actually contains, for a layout-changed error.
-def gen_tree
-  Dir.glob(File.join(GEN_DIR, "**", "*"), File::FNM_DOTMATCH)
-     .reject { |p| File.basename(p).start_with?(".") }
-     .map { |p| p.sub("#{GEN_DIR}/", "") + (File.symlink?(p) ? " -> #{File.readlink(p)}" : "") }
-end
-
-def bundled?(entries, path)
-  entries.any? { |(_, p)| covers_path?(p, path) }
-end
-
-def safe_real_path(ref)
-  return nil unless ref.respond_to?(:real_path)
-
-  ref.real_path.to_s
-rescue StandardError
-  nil
-end
-
-# Add a file on disk to a target's Copy Bundle Resources phase.
+# Confirm the generated project still has the targets and scheme this file names.
 #
-# Copying a file into the generated tree does NOT bundle it: the project has to
-# reference it too. That is the trap apply_app_ui sidesteps by overwriting the
-# template's own files in place, and here there is no existing file to overwrite.
-#
-# The converter may reference the extension's Resources as a folder rather than
-# file by file, in which case the copy alone is enough and adding a reference
-# would give two build rules the same output ("Multiple commands produce"). Ask
-# the project which shape it emitted instead of assuming either.
-def register_resource(proj, target, path)
-  phase = target.resources_build_phase
-  return if phase.files.any? { |bf| covers_path?(safe_real_path(bf.file_ref), path) }
+# project.yml and this Fastfile have to agree on three strings, and nothing else
+# would catch them drifting: a renamed target fails later, inside
+# update_code_signing_settings, with an error about a target that "does not
+# exist" and no hint about which file is wrong.
+def verify_project_shape
+  require "xcodeproj"
 
-  # Keep the new reference next to its siblings in the navigator when they are
-  # referenced individually; the group is cosmetic, the build phase is what ships.
-  sibling = proj.files.find { |f| safe_real_path(f) == File.join(File.dirname(path), "manifest.json") }
-  group = sibling&.parent || proj.main_group
-  ref = group.new_reference(path)
-  phase.add_file_reference(ref)
-end
+  proj = Xcodeproj::Project.open(PROJECT_PATH)
+  names = proj.targets.map(&:name)
+  [APP_NAME, EXT_TARGET_NAME].each do |wanted|
+    next if names.include?(wanted)
 
-# Does an existing reference already put `path` in the bundle — either as the
-# file itself, or as a folder reference containing it?
-def covers_path?(ref_path, path)
-  return false if ref_path.nil?
-
-  ref_path == path ||
-    (File.directory?(ref_path) && path.start_with?("#{ref_path}#{File::SEPARATOR}"))
-end
-
-# Stamp the shipped version into the extension's build-info.json.
-#
-# report.js reads this file to say which build a bug report came from. It has to
-# be written at build time because the version only exists as the git tag then —
-# the tracked copy carries placeholders, which is exactly what a local unstamped
-# build should report.
-#
-# It writes into the private copy sync_extension_resources just made under
-# build/gen, and is handed that directory rather than searching for the file:
-# globbing build/gen for it is exactly what failed in v0.6.0, because no copy of
-# the extension lives there until sync_extension_resources puts one there.
-def apply_build_info(res_dir, marketing_version, build_number)
-  require "json"
-
-  path = File.join(res_dir, BUILD_INFO_FILE)
-  unless File.file?(path)
     UI.user_error!(
-      "No #{BUILD_INFO_FILE} in #{res_dir} — sync_extension_resources should have copied it there " \
-      "from extension/. Without it every bug report would claim an unknown version."
+      "project.yml generated no target named '#{wanted}' (got #{names.inspect}). " \
+      "The Fastfile and project.yml must agree on the target names."
     )
   end
-  if File.realpath(path) == File.realpath(File.join(EXTENSION_DIR, BUILD_INFO_FILE))
+
+  schemes = Xcodeproj::Project.schemes(PROJECT_PATH)
+  unless schemes.include?(APP_NAME)
     UI.user_error!(
-      "Refusing to stamp #{path}: it resolves to the tracked #{BUILD_INFO_FILE}, so the build would " \
-      "rewrite a file in the working tree. sync_extension_resources should have privatised it first."
+      "project.yml generated no shared scheme named '#{APP_NAME}' (got #{schemes.inspect}). " \
+      "build_app needs it by name."
     )
   end
-
-  File.write(path, "#{JSON.pretty_generate('version' => marketing_version, 'build' => build_number)}\n")
-  UI.message("Stamped #{BUILD_INFO_FILE} with #{marketing_version} (#{build_number})")
-end
-
-# Re-enable scrolling in the container app's web view.
-#
-# Apple's app template disables the web view's scroll view on iOS
-# (`webView.scrollView.isScrollEnabled = false`) because the page it ships is a
-# single line of placeholder text. Our page is a full overview screen, so with
-# that line intact everything below the fold is simply unreachable — the app
-# looks truncated and dead. Flip it to true instead of deleting the line, so
-# the generated source still reads as a deliberate setting.
-#
-# Not fatal when the line is absent: that means the template no longer disables
-# scrolling, which is the state we want anyway. app/Main.html additionally
-# scrolls its own content in an overflow:auto container, so the page stays
-# usable even if this patch silently stops matching.
-def enable_app_scrolling
-  sources = Dir.glob(File.join(GEN_DIR, "**", "*.swift"))
-  UI.user_error!("safari-web-extension-converter produced no Swift sources under #{GEN_DIR}") if sources.empty?
-
-  patched = sources.select do |path|
-    contents = File.read(path)
-    next false unless contents.include?("isScrollEnabled = false")
-
-    File.write(path, contents.gsub("isScrollEnabled = false", "isScrollEnabled = true"))
-    true
-  end
-
-  if patched.empty?
-    UI.important(
-      "No `isScrollEnabled = false` in the generated app sources — the template no longer disables " \
-      "web view scrolling, or renamed it. Nothing to patch; app/Main.html scrolls its own content regardless."
-    )
-  else
-    UI.message("Re-enabled container-app scrolling in: #{patched.map { |p| p.sub("#{GEN_DIR}/", '') }.join(', ')}")
-  end
-end
-
-def find_target(proj, product_type, description)
-  targets = proj.targets.select { |t| t.respond_to?(:product_type) && t.product_type == product_type }
-  if targets.size != 1
-    UI.user_error!(
-      "Expected exactly 1 #{description} target (#{product_type}) in the generated " \
-      "project, found #{targets.size}: #{targets.map(&:name).inspect}. " \
-      "safari-web-extension-converter's output layout changed — update generate_project."
-    )
-  end
-  targets.first
-end
-
-def set_build_setting(target, key, value)
-  target.build_configurations.each { |c| c.build_settings[key] = value }
-end
-
-# Point the target's Info.plist version keys at the build settings, so the xcargs
-# overrides in build_app are authoritative, and stamp the user-visible display
-# name. A no-op when the target uses GENERATE_INFOPLIST_FILE (no file to patch —
-# the settings are already the source of truth); verify_ipa is what proves the
-# values reached the shipped binary either way.
-#
-# NOTE: the display name written here is NOT sufficient on its own — the
-# converter also sets INFOPLIST_KEY_CFBundleDisplayName, which Xcode merges on
-# top of this file. generate_project overrides that build setting for the same
-# reason; keep both in sync.
-def patch_infoplist(proj, target)
-  rel = target.build_configurations
-              .map { |c| c.build_settings["INFOPLIST_FILE"] }
-              .compact.first
-  return if rel.nil?
-
-  path = File.expand_path(rel, File.dirname(proj.path))
-  unless File.exist?(path)
-    UI.important("INFOPLIST_FILE #{rel} for #{target.name} does not exist — skipping version repoint")
-    return
-  end
-
-  plist = Xcodeproj::Plist.read_from_path(path)
-  plist["CFBundleShortVersionString"] = "$(MARKETING_VERSION)"
-  plist["CFBundleVersion"]            = "$(CURRENT_PROJECT_VERSION)"
-  plist["CFBundleDisplayName"]        = APP_DISPLAY_NAME
-  Xcodeproj::Plist.write_to_path(plist, path)
-end
-
-# Prefer the iOS app scheme; the converter names it '<App>' or '<App> (iOS)'.
-def pick_scheme(project_path)
-  schemes = Xcodeproj::Project.schemes(project_path)
-  UI.user_error!("No schemes in #{project_path}") if schemes.empty?
-  scheme = [APP_NAME, "#{APP_NAME} (iOS)"].find { |c| schemes.include?(c) } ||
-           schemes.find { |s| !s.include?("Extension") } ||
-           schemes.first
-  UI.message("Using scheme: #{scheme}")
-  scheme
 end
 
 def apply_signing(project, target, profile_name)
@@ -612,31 +332,40 @@ def apply_signing(project, target, profile_name)
   )
 end
 
-# Inspect the exported IPA and fail unless it is what we intend to ship. The
-# converter is a black box that runs fresh on every release, so these are the
-# invariants that a converter change (or a bad patch above) would break —
-# checked against the *shipped artifact*, not against the inputs that produced
-# it, so a patch silently failing to apply is caught rather than confirmed.
+# Inspect the exported IPA and fail unless it is what we intend to ship.
+#
+# These checks predate the move off the converter, when the project was invented
+# fresh on every release and this was the only thing standing between a converter
+# change and a broken TestFlight build. They matter less now that project.yml and
+# native/ are tracked and reviewable — but they read the *shipped artifact*
+# rather than the inputs that produced it, which is the one property that makes a
+# check worth having, so they stay:
 #
 #   1. exactly one .app with the expected bundle id
 #   2. exactly one embedded .appex, its id correctly nested under the app's
-#      (the case-mismatch bug that broke ValidateEmbeddedBinary and re-signing)
+#      (the case mismatch that used to break ValidateEmbeddedBinary)
 #   3. both carry the tag's version + this run's build number, or App Store
 #      Connect rejects the upload as a duplicate build
 #   4. both carry the user-visible display name — the space-free APP_NAME drives
 #      the build paths, so this is the only thing proving the real name shipped
 #   5. the app declares export compliance, so App Store Connect does not park
 #      the build behind a manual encryption question
-#   6. the content scripts and manifest are actually inside the appex — a signed,
-#      correctly-versioned IPA containing no extension code would otherwise sail
-#      through to TestFlight and simply do nothing on device
-#   7. the bug reporter's popup, its script and the collector are bundled, and
-#      build-info.json carries this build's version — otherwise every report
-#      filed from the extension would name the wrong build
-#   8. the container app ships OUR overview page, versioned — if the converter
-#      moves its template, apply_app_ui's copy would land somewhere unbundled
-#      and the app would quietly fall back to Apple's placeholder line
+#   6. every file in extension/ is actually inside the appex, and build-info.json
+#      carries this build's version — a signed, correctly-versioned IPA
+#      containing no extension code would otherwise sail through to TestFlight
+#      and simply do nothing on device
+#   7. the container app ships OUR overview page, versioned, rather than an empty
+#      or unstamped one
 def verify_ipa(ipa, marketing_version, build_number)
+  # extension/ is the contract, so check the whole directory rather than a list
+  # that can fall behind it. The named constants are unioned in as a floor: if a
+  # file is ever deleted from extension/, the glob quietly shrinks but these
+  # still fail.
+  expected = (
+    Dir.glob(File.join(EXTENSION_DIR, "*")).select { |p| File.file?(p) }.map { |p| File.basename(p) } +
+    CONTENT_SCRIPTS + REPORT_FILES + ["manifest.json"]
+  ).uniq.sort
+
   # Explicitly bash, not fastlane's default shell: this script uses arrays and
   # nullglob to count matches, which POSIX sh does not have.
   sh("bash", "-c", <<~BASH)
@@ -670,6 +399,11 @@ def verify_ipa(ipa, marketing_version, build_number)
       *) echo "::error::extension id '#{EXT_ID}' is not nested under app id '#{APP_ID}'"; exit 1 ;;
     esac
 
+    # The appex must declare itself a Safari web extension, or it installs and
+    # is simply never loaded by Safari.
+    point="$(plist_get "$EXT" "NSExtension:NSExtensionPointIdentifier")"
+    [ "$point" = "com.apple.Safari.web-extension" ] || { echo "::error::$(basename "$EXT"): NSExtensionPointIdentifier is '$point', expected 'com.apple.Safari.web-extension'. Safari would never load the extension."; exit 1; }
+
     check_version() {
       short="$(plist_get "$1" CFBundleShortVersionString)"
       build="$(plist_get "$1" CFBundleVersion)"
@@ -696,33 +430,29 @@ def verify_ipa(ipa, marketing_version, build_number)
     got="$(plist_get "$APP" ITSAppUsesNonExemptEncryption)"
     [ "$got" = "false" ] || { echo "::error::$(basename "$APP"): ITSAppUsesNonExemptEncryption is '$got', expected 'false'. Without it App Store Connect holds the build behind a manual export-compliance question before testers can install it."; exit 1; }
 
-    # The product itself must be in the appex's web resources, and so must the
-    # bug reporter's popup + collector (a missing one only shows up as a blank
-    # sheet behind the toolbar button, on device, after release).
-    for f in #{(CONTENT_SCRIPTS + REPORT_FILES).map { |s| "\"#{s}\"" }.join(" ")} manifest.json; do
-      find "$EXT" -name "$f" | grep -q . || { echo "::error::$f is not present in $(basename "$EXT") — the IPA would install an extension with no content script."; exit 1; }
+    # Everything in extension/ must have reached the appex's bundle root, where
+    # Safari reads manifest.json from.
+    for f in #{expected.map { |s| "\"#{s}\"" }.join(" ")}; do
+      [ -e "$EXT/$f" ] || { echo "::error::$f is not at the root of $(basename "$EXT") — project.yml bundles build/staged/extension file by file, so every file in extension/ should land there. A missing content script means the IPA installs an extension that does nothing."; exit 1; }
     done
 
     # The version the bug reporter quotes. Unstamped, every report from every
     # release would claim the placeholder version and be useless for bisecting.
-    INFO="$(find "$EXT" -name #{BUILD_INFO_FILE} -print -quit)"
-    [ -n "$INFO" ] || { echo "::error::no #{BUILD_INFO_FILE} in $(basename "$EXT") — bug reports would not name a version"; exit 1; }
+    INFO="$EXT/#{BUILD_INFO_FILE}"
     grep -q '"version": "#{marketing_version}"' "$INFO" || { echo "::error::#{BUILD_INFO_FILE} does not carry version #{marketing_version}: $(cat "$INFO")"; exit 1; }
     grep -q '"build": "#{build_number}"' "$INFO" || { echo "::error::#{BUILD_INFO_FILE} does not carry build #{build_number}: $(cat "$INFO")"; exit 1; }
 
-    # The container app's own UI: our overview page, with the version stamped
-    # in. A converter template move would leave the placeholder page bundled and
-    # our copy sitting unreferenced on disk — invisible without this check.
-    MAIN_HTML="$(find "$APP" -name Main.html -print -quit)"
-    [ -n "$MAIN_HTML" ] || { echo "::error::no Main.html in $(basename "$APP") — the container app has no UI"; exit 1; }
-    grep -q '#{APP_UI_MARKER}' "$MAIN_HTML" || { echo "::error::the bundled Main.html is not the app/ overview page (missing '#{APP_UI_MARKER}') — the app would show the converter's placeholder text"; exit 1; }
-    grep -q '#{APP_UI_VERSION_TOKEN}' "$MAIN_HTML" && { echo "::error::the bundled Main.html still contains the raw #{APP_UI_VERSION_TOKEN} placeholder"; exit 1; }
-    grep -q 'Version #{marketing_version} (#{build_number})' "$MAIN_HTML" || { echo "::error::the bundled Main.html does not show version #{marketing_version} (#{build_number})"; exit 1; }
+    # The container app's own UI: our overview page, with the version stamped in.
+    MAIN_HTML="$APP/#{APP_UI_MAIN}"
+    [ -e "$MAIN_HTML" ] || { echo "::error::no #{APP_UI_MAIN} at the root of $(basename "$APP") — the container app has no UI"; exit 1; }
+    grep -q '#{APP_UI_MARKER}' "$MAIN_HTML" || { echo "::error::the bundled #{APP_UI_MAIN} is not the app/ overview page (missing '#{APP_UI_MARKER}')"; exit 1; }
+    grep -q '#{APP_UI_VERSION_TOKEN}' "$MAIN_HTML" && { echo "::error::the bundled #{APP_UI_MAIN} still contains the raw #{APP_UI_VERSION_TOKEN} placeholder"; exit 1; }
+    grep -q 'Version #{marketing_version} (#{build_number})' "$MAIN_HTML" || { echo "::error::the bundled #{APP_UI_MAIN} does not show version #{marketing_version} (#{build_number})"; exit 1; }
     # The page carries its own CSS/JS/icon, so Main.html being present, ours,
     # and correctly versioned is the whole check — there are no sibling assets
     # that could go missing independently.
 
-    echo "OK: IPA ships '#{APP_DISPLAY_NAME}' (#{APP_ID} + #{EXT_ID}) at #{marketing_version} (#{build_number}) with the content scripts and the app overview UI"
+    echo "OK: IPA ships '#{APP_DISPLAY_NAME}' (#{APP_ID} + #{EXT_ID}) at #{marketing_version} (#{build_number}) with #{expected.size} extension files and the app overview UI"
   BASH
 end
 

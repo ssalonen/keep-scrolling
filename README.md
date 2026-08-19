@@ -51,13 +51,21 @@ full diagnosis and references.
 
 - `extension/` — the MV3 web extension (the whole product).
 - `app/Main.html` — the container app's screen: a short overview of what the
-  extension does plus the enable steps, as one self-contained page. Copied over
-  the converter's placeholder page at build time by `apply_app_ui`.
+  extension does plus the enable steps, as one self-contained page.
+- `native/` — the container app + appex Swift sources and `Info.plist`s. Small,
+  stable boilerplate; the product is the extension.
+- `project.yml` — the XcodeGen spec the Xcode project is generated from.
 - `test/extension.test.js` — `node:test` invariant guards; run with `node --test`.
 - `fastlane/` — signing (`match`) and release lanes; see
   [`docs/FASTLANE-MIGRATION.md`](docs/FASTLANE-MIGRATION.md).
-- No Xcode project is committed; it is generated at build time with
-  `xcrun safari-web-extension-converter`, then signed by `match`.
+- No Xcode project is committed; `xcodegen generate` builds it from `project.yml`
+  on every run, and `match` signs it. Up to v0.6.x it was generated instead by
+  `xcrun safari-web-extension-converter` — see the migration doc for why that
+  changed.
+
+To open the project in Xcode, run `bundle exec fastlane project` rather than
+`xcodegen generate` directly: the spec references staged web resources that the
+lane produces first.
 
 Releases are automated:
 

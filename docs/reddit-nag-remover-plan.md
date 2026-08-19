@@ -14,12 +14,17 @@ extension/
   block-x-nag.js           <- X/Twitter content script (independent, see x-nag-remover-plan.md)
   collect-report.js        <- read-only diagnostics collector (see bug-reporting.md)
   report.html / report.js  <- toolbar popup: describe a nag, file a prefilled GitHub issue
-  build-info.json          <- version/build, stamped at build time by apply_build_info
+  build-info.json          <- version/build, stamped at build time by stage_sources
   icon-48.png / icon-96.png / icon-128.png
 app/
   Main.html                <- container-app UI (self-contained: inline CSS/JS/icon),
-                              copied over the converter's placeholder page by
-                              apply_app_ui (Fastfile)
+                              staged + version-stamped by stage_sources (Fastfile)
+project.yml                <- XcodeGen spec: app + appex targets, bundle IDs, scheme
+native/
+  App/                     <- AppDelegate.swift, ViewController.swift (the WKWebView
+                              host for app/Main.html), Info.plist, Assets.xcassets
+  Extension/               <- SafariWebExtensionHandler.swift (principal class, does
+                              nothing — no native messaging), Info.plist
 .github/workflows/
   ci.yml                   <- lint + invariant tests + auto-release on green main
   release.yml              <- sign with match + upload to TestFlight + GitHub Release
@@ -50,23 +55,24 @@ user ticks the box.
 
 ## Build & distribution (CI → TestFlight)
 This repo does **not** commit an Xcode project. `fastlane`'s `beta` lane
-generates one at build time on a macOS runner with Apple's converter, signs it
-with `match`, and uploads to TestFlight. Full detail — including the five things
-the converter gets wrong and the one-time manual setup — is in
+generates one at build time on a macOS runner with **XcodeGen**, signs it with
+`match`, and uploads to TestFlight. Full detail — including why this moved off
+Apple's converter and the one-time manual setup — is in
 [`FASTLANE-MIGRATION.md`](FASTLANE-MIGRATION.md).
 
-1. `xcrun safari-web-extension-converter extension --ios-only ...` generates the
-   container App + Web Extension appex targets into `build/gen`.
-2. The Fastfile patches the generated project: forces both bundle IDs
-   (`fi.mailhub.keepscrolling` + `.Extension`), repoints the `Info.plist` version
-   keys at `$(MARKETING_VERSION)` / `$(CURRENT_PROJECT_VERSION)`, and replaces the
-   converter's placeholder container-app page with `app/Main.html` (feature
-   overview + enable steps, version stamped in).
+1. `stage_sources` copies `extension/` and `app/` into `build/staged/` and stamps
+   the build's version into `build-info.json` and `Main.html`'s footer. Tracked
+   files are never written to.
+2. `xcodegen generate` builds `KeepScrolling.xcodeproj` from `project.yml`: the
+   container app + Web Extension appex targets, both bundle IDs
+   (`fi.mailhub.keepscrolling` + `.Extension`), and a shared scheme. The
+   `Info.plist`s under `native/` already point `CFBundleShortVersionString` /
+   `CFBundleVersion` at the build settings, so nothing needs patching afterwards.
 3. `match` syncs the Apple Distribution cert + both App Store profiles; manual
    signing is stamped onto each target.
 4. `gym` archives and exports a signed `app-store` IPA; `verify_ipa` asserts the
-   shipped artifact's bundle IDs, versions, and that the content script is
-   actually inside the appex.
+   shipped artifact's bundle IDs, versions, the Safari extension point, and that
+   every file in `extension/` is actually inside the appex.
 5. `upload_to_testflight` uploads it; a separate ubuntu job publishes the
    changelog + GitHub Release.
 
@@ -93,11 +99,14 @@ bundle install
 bundle exec fastlane certificates                   # sync signing material
 MARKETING_VERSION=1.0.0 bundle exec fastlane build  # full pipeline, no upload
 ```
-To poke at the raw converter output instead:
+To just generate the project and work in Xcode:
 ```
-xcrun safari-web-extension-converter ./extension --ios-only
+bundle exec fastlane project        # stages web resources, then xcodegen
+xed KeepScrolling.xcodeproj
 ```
-Open the generated `.xcodeproj`, set your signing team, build to an iPhone.
+Set your signing team on both targets and build to an iPhone. Use the lane
+rather than a bare `xcodegen generate` — `project.yml` references
+`build/staged/…`, which does not exist until the lane stages it.
 
 ## How it works (and why it survives rotation)
 - Matches the nag by **stable structural signatures** — `rpl-bottom-sheet[blocking]`,

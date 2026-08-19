@@ -1,0 +1,114 @@
+# XcodeGen spec for Keep Scrolling.
+#
+# This replaces Apple's `safari-web-extension-converter`, which used to generate
+# the container app + extension appex from extension/ on every release. The
+# converter's output was a black box that changed under us: four of the eight
+# Fastfile commits after the fastlane migration were `fix:` commits repairing a
+# release that died in converter-adaptation code (the Base.lproj split, the
+# missing Script.js, the hardcoded scroll disable, the resources it never
+# copied). None of them were bugs in the extension.
+#
+# The native sources under native/ came from one final converter run and are now
+# tracked, reviewable, and boring. The .xcodeproj is still a build artifact —
+# generated into the repo root by the Fastfile and gitignored — so nothing
+# tracked is ever written by a build.
+#
+# IMPORTANT: the two `build/staged/…` source paths are produced by the Fastfile's
+# stage_sources before it runs xcodegen. A bare `xcodegen generate` in a clean
+# checkout will fail on them; use `bundle exec fastlane project` instead, which
+# stages first.
+
+name: KeepScrolling
+
+options:
+  bundleIdPrefix: fi.mailhub
+  createIntermediateGroups: true
+  # Safari web extensions on iOS need 15.0. The content scripts' `:has()` CSS
+  # backstop wants Safari 16.4, but that is a runtime capability with a JS
+  # fallback, not a deployment floor — see docs/x-nag-remover-plan.md.
+  deploymentTarget:
+    iOS: "15.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    # Placeholders only. The real values come from the git tag and the CI run
+    # number, passed as xcargs by the Fastfile — see build_signed_ipa.
+    MARKETING_VERSION: "0.0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    # The Info.plist files under native/ are the single source of truth. With
+    # GENERATE_INFOPLIST_FILE=YES Xcode merges the INFOPLIST_KEY_* build settings
+    # *over* the file, which is exactly how the converter silently shipped
+    # "KeepScrolling" as the display name instead of "Keep Scrolling".
+    GENERATE_INFOPLIST_FILE: NO
+
+targets:
+  # ── Container app ────────────────────────────────────────────────────────────
+  # Does nothing functional — the product is the extension — but it is the only
+  # screen a user ever sees. Its UI is app/Main.html; see CLAUDE.md.
+  KeepScrolling:
+    type: application
+    platform: iOS
+    sources:
+      - path: native/App
+        excludes:
+          # Consumed as INFOPLIST_FILE below; adding it to a build phase as well
+          # would bundle a second, unprocessed copy.
+          - Info.plist
+      # Staged by the Fastfile: app/Main.html with the build's version stamped
+      # into its footer. Staged rather than referenced in place so that a build
+      # never writes to a tracked file.
+      - path: build/staged/app
+        buildPhase: resources
+        type: group
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: fi.mailhub.keepscrolling
+        INFOPLIST_FILE: native/App/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    dependencies:
+      - target: KeepScrollingExtension
+        embed: true
+
+  # ── Safari web extension appex ───────────────────────────────────────────────
+  KeepScrollingExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: native/Extension
+        excludes:
+          - Info.plist
+      # The whole staged extension/, file by file (`type: group`, NOT a folder
+      # reference), so every file lands at the appex bundle root where Safari
+      # looks for manifest.json.
+      #
+      # This is what makes extension/ the contract: xcodegen enumerates the
+      # directory at generate time, so a new file ships with no change here and
+      # no manifest entry. build-info.json is named only in report.js's
+      # runtime.getURL and was absent from the converter's output entirely,
+      # which failed the v0.6.0 release.
+      - path: build/staged/extension
+        buildPhase: resources
+        type: group
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: fi.mailhub.keepscrolling.Extension
+        INFOPLIST_FILE: native/Extension/Info.plist
+
+schemes:
+  # Declared explicitly (and therefore shared) so `build_app(scheme:)` never has
+  # to guess. The converter named its scheme unpredictably, which is why the old
+  # Fastfile had a pick_scheme fallback chain.
+  KeepScrolling:
+    build:
+      targets:
+        KeepScrolling: all
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

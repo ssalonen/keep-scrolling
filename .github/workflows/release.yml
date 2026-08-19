@@ -108,9 +108,21 @@ jobs:
           ruby-version: '3.3'
           bundler-cache: true
 
-      # Generate the Xcode project from extension/ with Apple's converter, sync
-      # signing (match), archive, export, verify the shipped IPA, and upload to
-      # TestFlight — all in the beta lane, so a Mac can reproduce it with
+      # Generates the Xcode project from project.yml. Preinstalled on the GitHub
+      # macOS runner images, so this is normally a no-op — installing only when
+      # missing keeps a runner-image change from breaking the release, without
+      # paying for a brew update on every run.
+      - name: Ensure XcodeGen is available
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            echo "xcodegen not on PATH — installing"
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      # Generate the Xcode project from project.yml, sync signing (match),
+      # archive, export, verify the shipped IPA, and upload to TestFlight — all
+      # in the beta lane, so a Mac can reproduce it with
       # `bundle exec fastlane build`.
       - name: Build & upload to TestFlight
         run: bundle exec fastlane beta

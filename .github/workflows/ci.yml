@@ -39,6 +39,20 @@ jobs:
           node -e "JSON.parse(require('fs').readFileSync('extension/manifest.json','utf8'))"
           node -e "JSON.parse(require('fs').readFileSync('extension/build-info.json','utf8'))"
 
+      # The build inputs, checked on the cheap Linux job. A malformed project.yml
+      # or Info.plist would otherwise only surface on the macOS release runner,
+      # i.e. after a tag has already been pushed.
+      - name: Validate build spec and Info.plists parse
+        run: |
+          python3 -c "import yaml" 2>/dev/null || pip3 install --quiet --disable-pip-version-check pyyaml
+          python3 -c "import yaml; yaml.safe_load(open('project.yml')); print('project.yml OK')"
+          python3 -c "
+          import plistlib
+          for p in ['native/App/Info.plist', 'native/Extension/Info.plist']:
+              plistlib.load(open(p, 'rb'))
+              print(p, 'OK')
+          "
+
       - name: Run invariant tests
         run: node --test test/extension.test.js
 

@@ -2,6 +2,10 @@
 build/
 .build/
 DerivedData/
+# Generated from project.yml by `xcodegen generate` on every build (see the
+# Fastfile). Never commit it — a tracked project would drift from the spec and
+# the spec would stop being the source of truth.
+*.xcodeproj
 *.xcarchive
 *.ipa
 Payload/
